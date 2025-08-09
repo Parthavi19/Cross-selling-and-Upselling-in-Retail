@@ -1,0 +1,11 @@
+gradio==4.36.1
+pydantic==2.8.2
+pydantic-core==2.20.1
+pandas>=1.5.0
+numpy>=1.21.0
+mlxtend>=0.22.0
+scikit-learn>=1.0.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+uvicorn>=0.18.0
+fastapi>=0.95.0
