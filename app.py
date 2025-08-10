@@ -6,6 +6,7 @@ import tempfile
 import io
 import base64
 import gc
+import psutil
 from typing import Tuple, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -21,8 +22,8 @@ from mlxtend.frequent_patterns import apriori, association_rules
 # Configure logging and suppress warnings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterWarnings("ignore", category=FutureWarning)
-warnings.filterWarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # Set environment variables to reduce warnings
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "false"
@@ -47,14 +48,21 @@ class OptimizedMarketBasketAnalyzer:
     """Optimized analyzer for production deployment with large file handling"""
     
     def __init__(self):
-        self.max_orders = 50000  # Increased to handle larger datasets
+        self.max_orders = 25000  # Reduced for memory efficiency
         self.chunk_size = 5000
         self.sample_rates = {
-            'orders': 0.2,  # Reduced for large datasets
-            'order_products': 0.3,
+            'orders': 0.1,  # Further reduced for very large datasets
+            'order_products': 0.2,  # Reduced to manage memory
             'large_threshold': 50 * 1024 * 1024  # 50MB
         }
+        self.max_products = 1000  # Limit unique products for market basket analysis
         
+    def get_memory_usage(self) -> float:
+        """Get current memory usage in MB"""
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        return mem_info.rss / (1024 * 1024)  # Convert bytes to MB
+    
     def get_file_size_mb(self, file_path: str) -> float:
         """Get file size in MB"""
         try:
@@ -107,8 +115,8 @@ class OptimizedMarketBasketAnalyzer:
         file_size = self.get_file_size_mb(file_path)
         
         try:
-            logging.info(f"Loading file {file_path} ({file_size:.1f}MB)")
-            if file_size > 200:  # Adjusted threshold for aggressive sampling
+            logging.info(f"Loading file {file_path} ({file_size:.1f}MB), Memory usage: {self.get_memory_usage():.1f}MB")
+            if file_size > 100:  # Adjusted threshold for aggressive sampling
                 logging.info(f"Large file detected ({file_size:.1f}MB), using chunked loading with sample rate {sample_rate}")
                 
                 chunks = []
@@ -119,25 +127,26 @@ class OptimizedMarketBasketAnalyzer:
                     chunks.append(chunk)
                     total_rows += len(chunk)
                     # Limit memory usage
-                    if total_rows >= self.max_orders * 2:  # Allow some buffer
+                    if total_rows >= self.max_orders * 2:
                         logging.info(f"Stopping at {total_rows:,} rows to prevent memory issues")
                         break
+                    logging.info(f"Processed chunk, total rows: {total_rows:,}, Memory usage: {self.get_memory_usage():.1f}MB")
                 
                 if not chunks:
                     logging.error("No data loaded from chunks")
                     return pd.DataFrame(columns=columns)
                 
                 result = pd.concat(chunks, ignore_index=True)
-                logging.info(f"Loaded {len(result):,} rows from {len(chunks)} chunks")
+                logging.info(f"Loaded {len(result):,} rows from {len(chunks)} chunks, Memory usage: {self.get_memory_usage():.1f}MB")
                 return result
                 
             else:
                 # Normal loading for smaller files
                 df = pd.read_csv(file_path, usecols=columns)
-                logging.info(f"Loaded {len(df):,} rows from {file_path}")
+                logging.info(f"Loaded {len(df):,} rows from {file_path}, Memory usage: {self.get_memory_usage():.1f}MB")
                 if sample_rate < 1.0:
                     df = df.sample(frac=sample_rate, random_state=42)
-                    logging.info(f"Sampled to {len(df):,} rows")
+                    logging.info(f"Sampled to {len(df):,} rows, Memory usage: {self.get_memory_usage():.1f}MB")
                 return df
                 
         except Exception as e:
@@ -146,9 +155,16 @@ class OptimizedMarketBasketAnalyzer:
             return pd.read_csv(file_path, usecols=columns, nrows=10000)
     
     def analyze_market_basket(self, data) -> str:
-        """Perform market basket analysis with error handling"""
+        """Perform market basket analysis with error handling and product limiting"""
         try:
-            logging.info("Analyzing market basket patterns")
+            logging.info(f"Starting market basket analysis, Memory usage: {self.get_memory_usage():.1f}MB")
+            
+            # Limit number of unique products to reduce memory usage
+            product_counts = data['product_name'].value_counts()
+            if len(product_counts) > self.max_products:
+                top_products = product_counts.head(self.max_products).index
+                data = data[data['product_name'].isin(top_products)]
+                logging.info(f"Limited to {self.max_products} most frequent products, Memory usage: {self.get_memory_usage():.1f}MB")
             
             # Create transaction matrix
             basket_df = (data.groupby(['order_id', 'product_name'])
@@ -157,10 +173,14 @@ class OptimizedMarketBasketAnalyzer:
             # Convert to boolean for Apriori
             basket_bool = basket_df > 0
             
-            logging.info(f"Analyzing {basket_bool.shape[0]} orders with {basket_bool.shape[1]} unique products")
+            logging.info(f"Analyzing {basket_bool.shape[0]} orders with {basket_bool.shape[1]} unique products, Memory usage: {self.get_memory_usage():.1f}MB")
             
             if basket_bool.shape[0] < 20:
                 return "❌ Need at least 20 orders for meaningful analysis"
+            
+            if basket_bool.shape[0] > 50000:
+                logging.warning("Dataset too large for market basket analysis, skipping")
+                return "❌ Dataset too large for market basket analysis. Try a smaller sample."
             
             # Run Apriori with adaptive thresholds
             min_support = max(0.01, 10 / basket_bool.shape[0])  # Adaptive threshold
@@ -207,6 +227,7 @@ class OptimizedMarketBasketAnalyzer:
                     f"   • Lift: {rule['lift']:.2f}x (strength of association)\n\n"
                 )
             
+            logging.info(f"Market basket analysis complete, Memory usage: {self.get_memory_usage():.1f}MB")
             return ''.join(result_lines)
             
         except Exception as e:
@@ -216,13 +237,13 @@ class OptimizedMarketBasketAnalyzer:
     def analyze_customer_segments(self, data) -> Tuple[str, str]:
         """Perform customer segmentation analysis"""
         try:
-            logging.info("Analyzing customer segments")
+            logging.info(f"Starting customer segmentation, Memory usage: {self.get_memory_usage():.1f}MB")
             
             # Create customer-aisle purchase matrix
             customer_aisle = (data.groupby(['user_id', 'aisle'])
                             .size().unstack(fill_value=0))
             
-            logging.info(f"Analyzing {customer_aisle.shape[0]} customers across {customer_aisle.shape[1]} aisles")
+            logging.info(f"Analyzing {customer_aisle.shape[0]} customers across {customer_aisle.shape[1]} aisles, Memory usage: {self.get_memory_usage():.1f}MB")
             
             if customer_aisle.shape[0] < 10:
                 return "❌ Need at least 10 customers for segmentation", ""
@@ -243,7 +264,7 @@ class OptimizedMarketBasketAnalyzer:
             # Determine optimal clusters
             n_clusters = min(6, max(2, customer_aisle.shape[0] // 15))
             
-            logging.info(f"Creating {n_clusters} customer segments")
+            logging.info(f"Creating {n_clusters} customer segments, Memory usage: {self.get_memory_usage():.1f}MB")
             
             # Perform clustering
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=300)
@@ -294,6 +315,7 @@ class OptimizedMarketBasketAnalyzer:
             # Create visualization
             viz_html = self._create_segment_visualization(cluster_labels, cluster_profiles)
             
+            logging.info(f"Customer segmentation complete, Memory usage: {self.get_memory_usage():.1f}MB")
             return ''.join(segment_descriptions), viz_html
             
         except Exception as e:
@@ -314,6 +336,7 @@ class OptimizedMarketBasketAnalyzer:
     def _create_segment_visualization(self, clusters, profiles) -> str:
         """Create customer segment visualization"""
         try:
+            logging.info(f"Creating visualization, Memory usage: {self.get_memory_usage():.1f}MB")
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
             
             # Segment size distribution
@@ -360,6 +383,7 @@ class OptimizedMarketBasketAnalyzer:
             # Clean up memory
             gc.collect()
             
+            logging.info(f"Visualization complete, Memory usage: {self.get_memory_usage():.1f}MB")
             return f'<img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;">'
             
         except Exception as e:
@@ -369,6 +393,7 @@ class OptimizedMarketBasketAnalyzer:
     def generate_recommendations(self, market_result: str, segment_result: str) -> Tuple[str, str]:
         """Generate actionable business recommendations"""
         try:
+            logging.info(f"Generating recommendations, Memory usage: {self.get_memory_usage():.1f}MB")
             # Cross-selling recommendations
             if "❌" not in market_result and "association rules" in market_result.lower():
                 cross_sell = """🎯 **CROSS-SELLING STRATEGY**
@@ -434,6 +459,7 @@ Current segmentation needs refinement. Recommended steps:
 • **Demographic Integration**: Combine with customer demographic data
 • **Behavioral Tracking**: Monitor website/app engagement patterns"""
 
+            logging.info(f"Recommendations generated, Memory usage: {self.get_memory_usage():.1f}MB")
             return cross_sell, upsell
         except Exception as e:
             logging.error(f"Recommendation generation failed: {str(e)}", exc_info=True)
@@ -442,7 +468,7 @@ Current segmentation needs refinement. Recommended steps:
     def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
         """Main analysis pipeline with comprehensive error handling and chunked merging"""
         try:
-            logging.info("Starting complete analysis")
+            logging.info(f"Starting complete analysis, Memory usage: {self.get_memory_usage():.1f}MB")
             # Validation phase
             files = [orders_file, order_products_file, products_file, aisles_file]
             required_columns = [
@@ -471,7 +497,7 @@ Current segmentation needs refinement. Recommended steps:
             # Limit orders for performance
             if len(orders_df) > self.max_orders:
                 orders_df = orders_df.sample(n=self.max_orders, random_state=42)
-                logging.info(f"Sampled to {len(orders_df):,} orders for analysis")
+                logging.info(f"Sampled to {len(orders_df):,} orders for analysis, Memory usage: {self.get_memory_usage():.1f}MB")
             
             # Load order products filtered by sampled orders
             order_products_df = self.load_file_smart(
@@ -485,7 +511,7 @@ Current segmentation needs refinement. Recommended steps:
                 order_products_df['order_id'].isin(orders_df['order_id'])
             ]
             
-            logging.info(f"Processing {len(order_products_df):,} order items")
+            logging.info(f"Processing {len(order_products_df):,} order items, Memory usage: {self.get_memory_usage():.1f}MB")
             
             # Load reference data
             products_df = pd.read_csv(products_file.name)
@@ -498,7 +524,7 @@ Current segmentation needs refinement. Recommended steps:
             # Chunked merging to reduce memory usage
             logging.info("Merging datasets in chunks")
             merged_data_chunks = []
-            chunk_size = 10000  # Smaller chunks for merging
+            chunk_size = 5000  # Smaller chunks for merging
             for start in range(0, len(order_products_df), chunk_size):
                 chunk = order_products_df.iloc[start:start + chunk_size]
                 merged_chunk = (chunk
@@ -507,14 +533,15 @@ Current segmentation needs refinement. Recommended steps:
                                .merge(aisles_df, on='aisle_id', how='left')
                                .dropna(subset=['user_id', 'product_name', 'aisle']))
                 merged_data_chunks.append(merged_chunk)
-                logging.info(f"Processed merge chunk {start//chunk_size + 1} with {len(merged_chunk):,} rows")
+                logging.info(f"Processed merge chunk {start//chunk_size + 1} with {len(merged_chunk):,} rows, Memory usage: {self.get_memory_usage():.1f}MB")
+                gc.collect()  # Clean up memory after each chunk
             
             if not merged_data_chunks:
                 logging.error("No data remains after merging")
                 return "❌ No data remains after merging. Check file compatibility.", "", "", "", ""
             
             merged_data = pd.concat(merged_data_chunks, ignore_index=True)
-            logging.info(f"Final dataset: {len(merged_data):,} records from {merged_data['user_id'].nunique():,} customers")
+            logging.info(f"Final dataset: {len(merged_data):,} records from {merged_data['user_id'].nunique():,} customers, Memory usage: {self.get_memory_usage():.1f}MB")
             
             # Analysis phase
             logging.info("Running market basket analysis")
@@ -530,7 +557,7 @@ Current segmentation needs refinement. Recommended steps:
             del merged_data, order_products_df, orders_df, merged_data_chunks
             gc.collect()
             
-            logging.info("Analysis complete")
+            logging.info(f"Analysis complete, Memory usage: {self.get_memory_usage():.1f}MB")
             return market_analysis, segment_analysis, visualization, cross_sell_recs, upsell_recs
             
         except Exception as e:
@@ -569,9 +596,10 @@ def create_production_interface():
             
             **💡 Performance Tips:**
             - Files up to 800MB supported with automatic optimization
-            - Large datasets (>1M rows) are sampled to manage memory and speed
-            - Analysis may take 1-5 minutes for very large datasets
-            - Ensure sufficient memory (4GB recommended) for large files
+            - Very large datasets (>1M rows) are heavily sampled to manage memory
+            - Analysis may take 2-10 minutes for large datasets
+            - Use at least 4GB memory for datasets with millions of rows
+            - Ensure CSV files are UTF-8 encoded and columns match exactly
             """)
         
         with gr.Row():
