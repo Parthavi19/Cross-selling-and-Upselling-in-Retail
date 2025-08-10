@@ -21,8 +21,8 @@ from mlxtend.frequent_patterns import apriori, association_rules
 # Configure logging and suppress warnings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterWarnings("ignore", category=FutureWarning)
+warnings.filterWarnings("ignore", category=UserWarning)
 
 # Set environment variables to reduce warnings
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "false"
@@ -47,10 +47,10 @@ class OptimizedMarketBasketAnalyzer:
     """Optimized analyzer for production deployment with large file handling"""
     
     def __init__(self):
-        self.max_orders = 8000
+        self.max_orders = 50000  # Increased to handle larger datasets
         self.chunk_size = 5000
         self.sample_rates = {
-            'orders': 0.4,
+            'orders': 0.2,  # Reduced for large datasets
             'order_products': 0.3,
             'large_threshold': 50 * 1024 * 1024  # 50MB
         }
@@ -107,35 +107,41 @@ class OptimizedMarketBasketAnalyzer:
         file_size = self.get_file_size_mb(file_path)
         
         try:
-            if file_size > 50:  # Large file handling
-                logging.info(f"Large file detected ({file_size:.1f}MB), using chunked loading")
+            logging.info(f"Loading file {file_path} ({file_size:.1f}MB)")
+            if file_size > 200:  # Adjusted threshold for aggressive sampling
+                logging.info(f"Large file detected ({file_size:.1f}MB), using chunked loading with sample rate {sample_rate}")
                 
                 chunks = []
-                total_chunks = 0
-                
+                total_rows = 0
                 for chunk in pd.read_csv(file_path, chunksize=self.chunk_size, usecols=columns):
                     if sample_rate < 1.0:
                         chunk = chunk.sample(frac=sample_rate, random_state=42)
                     chunks.append(chunk)
-                    total_chunks += 1
-                    
+                    total_rows += len(chunk)
                     # Limit memory usage
-                    if total_chunks >= 30:  # Max 30 chunks
+                    if total_rows >= self.max_orders * 2:  # Allow some buffer
+                        logging.info(f"Stopping at {total_rows:,} rows to prevent memory issues")
                         break
                 
+                if not chunks:
+                    logging.error("No data loaded from chunks")
+                    return pd.DataFrame(columns=columns)
+                
                 result = pd.concat(chunks, ignore_index=True)
-                logging.info(f"Loaded {len(result)} rows from {total_chunks} chunks")
+                logging.info(f"Loaded {len(result):,} rows from {len(chunks)} chunks")
                 return result
                 
             else:
                 # Normal loading for smaller files
                 df = pd.read_csv(file_path, usecols=columns)
+                logging.info(f"Loaded {len(df):,} rows from {file_path}")
                 if sample_rate < 1.0:
                     df = df.sample(frac=sample_rate, random_state=42)
+                    logging.info(f"Sampled to {len(df):,} rows")
                 return df
                 
         except Exception as e:
-            logging.error(f"Error loading file, trying fallback method: {e}", exc_info=True)
+            logging.error(f"Error loading file {file_path}: {str(e)}", exc_info=True)
             # Fallback: load limited rows
             return pd.read_csv(file_path, usecols=columns, nrows=10000)
     
@@ -434,7 +440,7 @@ Current segmentation needs refinement. Recommended steps:
             return f"❌ Recommendation generation failed: {str(e)}", ""
     
     def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
-        """Main analysis pipeline with comprehensive error handling"""
+        """Main analysis pipeline with comprehensive error handling and chunked merging"""
         try:
             logging.info("Starting complete analysis")
             # Validation phase
@@ -489,18 +495,25 @@ Current segmentation needs refinement. Recommended steps:
             products_df = self.clean_product_names(products_df, 'product_name')
             aisles_df = self.clean_product_names(aisles_df, 'aisle')
             
-            # Merge all data
-            logging.info("Merging datasets")
-            merged_data = (order_products_df
-                          .merge(orders_df[['order_id', 'user_id']], on='order_id', how='left')
-                          .merge(products_df, on='product_id', how='left')
-                          .merge(aisles_df, on='aisle_id', how='left')
-                          .dropna(subset=['user_id', 'product_name', 'aisle']))
+            # Chunked merging to reduce memory usage
+            logging.info("Merging datasets in chunks")
+            merged_data_chunks = []
+            chunk_size = 10000  # Smaller chunks for merging
+            for start in range(0, len(order_products_df), chunk_size):
+                chunk = order_products_df.iloc[start:start + chunk_size]
+                merged_chunk = (chunk
+                               .merge(orders_df[['order_id', 'user_id']], on='order_id', how='left')
+                               .merge(products_df, on='product_id', how='left')
+                               .merge(aisles_df, on='aisle_id', how='left')
+                               .dropna(subset=['user_id', 'product_name', 'aisle']))
+                merged_data_chunks.append(merged_chunk)
+                logging.info(f"Processed merge chunk {start//chunk_size + 1} with {len(merged_chunk):,} rows")
             
-            if merged_data.empty:
+            if not merged_data_chunks:
                 logging.error("No data remains after merging")
                 return "❌ No data remains after merging. Check file compatibility.", "", "", "", ""
             
+            merged_data = pd.concat(merged_data_chunks, ignore_index=True)
             logging.info(f"Final dataset: {len(merged_data):,} records from {merged_data['user_id'].nunique():,} customers")
             
             # Analysis phase
@@ -514,7 +527,7 @@ Current segmentation needs refinement. Recommended steps:
             cross_sell_recs, upsell_recs = self.generate_recommendations(market_analysis, segment_analysis)
             
             # Memory cleanup
-            del merged_data, order_products_df, orders_df
+            del merged_data, order_products_df, orders_df, merged_data_chunks
             gc.collect()
             
             logging.info("Analysis complete")
@@ -556,9 +569,9 @@ def create_production_interface():
             
             **💡 Performance Tips:**
             - Files up to 800MB supported with automatic optimization
-            - Large datasets are intelligently sampled for faster processing
-            - Analysis typically completes in 30-90 seconds
-            - Results include visualizations and actionable recommendations
+            - Large datasets (>1M rows) are sampled to manage memory and speed
+            - Analysis may take 1-5 minutes for very large datasets
+            - Ensure sufficient memory (4GB recommended) for large files
             """)
         
         with gr.Row():
