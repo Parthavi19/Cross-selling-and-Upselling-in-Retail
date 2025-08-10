@@ -35,6 +35,7 @@ try:
     import matplotlib.pyplot as plt
     import seaborn as sns
     from mlxtend.frequent_patterns import apriori, association_rules
+    from fastapi import FastAPI
     
     logging.info("✅ All libraries imported successfully")
     
@@ -528,9 +529,9 @@ def create_production_interface():
     
     with gr.Blocks(
         title="Market Basket Analysis Dashboard", 
-        theme=gr.themes.Soft(),
+        theme=gr.themes.Base(),  # Use lighter theme for faster startup
         css=".gradio-container {max-width: 1200px !important}"
-    ) as app:
+    ) as gradio_app:
         
         gr.HTML("""
         <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; margin: -20px -20px 20px -20px;">
@@ -640,29 +641,24 @@ def create_production_interface():
         </div>
         """)
     
-    return app
+    return gradio_app
+
+# Create FastAPI app for health check and Gradio mounting
+app = FastAPI()
+
+# Health check endpoint for Cloud Run
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+# Mount Gradio app
+gradio_app = create_production_interface()
+app.mount("/", gradio_app)
 
 if __name__ == "__main__":
     try:
         logging.info("✅ Creating optimized interface...")
-        app = create_production_interface()
-        
-        port = int(os.environ.get("PORT", 8080))
-        logging.info(f"Starting server on port {port}")
-        
-        app.launch(
-            server_name="0.0.0.0",
-            server_port=port,
-            share=False,
-            show_error=True,
-            quiet=True,
-            enable_queue=False,
-            max_threads=4,
-            max_file_size="300mb",
-            allowed_paths=[],
-            prevent_thread_lock=True
-        )
-        logging.info("Market Basket Analysis Dashboard is running")
+        # Note: uvicorn is run via Dockerfile CMD, not here
         print("✅ Market Basket Analysis Dashboard is running!")
         
     except Exception as e:
