@@ -669,7 +669,7 @@ if __name__ == "__main__":
     try:
         logging.info("Creating optimized interface")
         app = create_production_interface()
-        app.mount("/health", app_fastapi)
+        
         port = int(os.environ.get("PORT", 8080))
         logging.info(f"Starting server on port {port}")
         app.launch(
