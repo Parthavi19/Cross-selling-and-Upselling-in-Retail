@@ -1,416 +1,449 @@
+import os
+import sys
+import warnings
+warnings.filterwarnings("ignore")
+
+# Set matplotlib backend before any imports
+import matplotlib
+matplotlib.use('Agg')
+
+print("🚀 Starting Market Basket Analysis Dashboard...")
+print(f"Python version: {sys.version}")
+print(f"Starting on port: {os.environ.get('PORT', 8080)}")
+
 import gradio as gr
 import pandas as pd
 import numpy as np
-from mlxtend.frequent_patterns import apriori, association_rules
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
 import tempfile
-import os
-import warnings
-import re
 import io
 import base64
 
-# Suppress warnings for cleaner output
-warnings.filterwarnings("ignore")
+# Import ML libraries with error handling
+try:
+    from mlxtend.frequent_patterns import apriori, association_rules
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    print("✅ All libraries imported successfully")
+except ImportError as e:
+    print(f"❌ Import error: {e}")
+    sys.exit(1)
 
-# Set matplotlib backend to avoid GUI issues
-plt.switch_backend('Agg')
-
-def clean_column_names(df, column_name):
-    """Clean column names to ensure they are valid Python identifiers"""
-    if column_name in df.columns:
-        df[column_name] = df[column_name].astype(str)
-        df[column_name] = df[column_name].str.strip()
-        df[column_name] = df[column_name].str.replace(r'[^\w\s]', '', regex=True)
-        df[column_name] = df[column_name].str.replace(r'\s+', '_', regex=True)
-        df[column_name] = df[column_name].str.lower()
-        df[column_name] = df[column_name].apply(lambda x: f"item_{x}" if x and not x[0].isalpha() and x[0] != '_' else x)
-        df[column_name] = df[column_name].replace('', 'unknown')
-    return df
-
-def validate_file_structure(file_path, expected_columns, file_name):
-    """Validate CSV file structure and return error message if invalid"""
-    try:
-        df = pd.read_csv(file_path, nrows=5)  # Read only first 5 rows for validation
-        missing_cols = [col for col in expected_columns if col not in df.columns]
-        if missing_cols:
-            return f"❌ {file_name} missing columns: {', '.join(missing_cols)}"
-        return None
-    except Exception as e:
-        return f"❌ Error reading {file_name}: {str(e)}"
-
-def create_visualization(clusters, cluster_summary):
-    """Create visualization and return as base64 encoded image"""
-    try:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-        
-        # Cluster distribution
-        cluster_counts = pd.Series(clusters).value_counts().sort_index()
-        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98FB98', '#F0E68C']
-        bars = ax1.bar([f'Cluster {i}' for i in cluster_counts.index], 
-                      cluster_counts.values, 
-                      color=colors[:len(cluster_counts)])
-        ax1.set_title('Customer Cluster Distribution', fontsize=14, fontweight='bold')
-        ax1.set_xlabel('Cluster')
-        ax1.set_ylabel('Number of Customers')
-        
-        # Add value labels on bars
-        for bar in bars:
-            height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{int(height)}', ha='center', va='bottom', fontweight='bold')
-        
-        # Top aisles heatmap
-        top_aisles_overall = cluster_summary.mean(axis=0).nlargest(min(10, cluster_summary.shape[1]))
-        heatmap_data = cluster_summary[top_aisles_overall.index]
-        
-        if not heatmap_data.empty:
-            display_columns = [col.replace('_', ' ').title() for col in heatmap_data.columns]
-            heatmap_data_display = heatmap_data.copy()
-            heatmap_data_display.columns = display_columns
-            
-            sns.heatmap(heatmap_data_display.T, annot=True, cmap='YlOrRd', 
-                       ax=ax2, cbar_kws={'label': 'Average Purchases'}, fmt='.1f')
-            ax2.set_title('Top Aisles by Cluster', fontsize=14, fontweight='bold')
-            ax2.set_xlabel('Cluster')
-            ax2.set_ylabel('Aisle')
-        else:
-            ax2.text(0.5, 0.5, 'No data for heatmap', 
-                    ha='center', va='center', transform=ax2.transAxes)
-            ax2.set_title('Top Aisles by Cluster (No Data)', fontsize=14, fontweight='bold')
-        
-        plt.tight_layout()
-        
-        # Convert to base64 string
-        buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', dpi=300, bbox_inches='tight', facecolor='white')
-        buffer.seek(0)
-        image_base64 = base64.b64encode(buffer.read()).decode()
-        plt.close()
-        
-        return f"data:image/png;base64,{image_base64}"
-        
-    except Exception as e:
-        print(f"Visualization error: {e}")
-        return None
-
-def process_data(orders_file, order_products_file, products_file, aisles_file):
-    """Process Instacart dataset to perform market basket analysis and customer clustering"""
+class MarketBasketAnalyzer:
+    """Streamlined market basket analyzer with optimized processing"""
     
-    try:
-        # Validate file uploads
-        files = [orders_file, order_products_file, products_file, aisles_file]
-        file_names = ["orders.csv", "order_products.csv", "products.csv", "aisles.csv"]
+    def __init__(self):
+        self.max_orders = 5000  # Reduced for large file handling
+        self.chunk_size = 10000  # Process in chunks
         
-        for i, (file, expected_name) in enumerate(zip(files, file_names)):
+    def clean_names(self, df, column):
+        """Fast column cleaning"""
+        if column in df.columns:
+            df[column] = df[column].astype(str).str.lower().str.replace(r'[^\w\s]', '', regex=True)
+        return df
+    
+    def validate_files(self, files, expected_columns):
+        """Quick file validation with size check"""
+        for i, (file, cols) in enumerate(zip(files, expected_columns)):
             if file is None:
-                return f"❌ Please upload {expected_name}", "", "", "", ""
-        
-        # Validate file structures
-        required_columns = {
-            'orders.csv': ['order_id', 'user_id'],
-            'order_products.csv': ['order_id', 'product_id'],
-            'products.csv': ['product_id', 'product_name', 'aisle_id'],
-            'aisles.csv': ['aisle_id', 'aisle']
-        }
-        
-        file_paths = [file.name for file in files]
-        
-        for i, (file_path, file_name) in enumerate(zip(file_paths, file_names)):
-            error = validate_file_structure(file_path, required_columns[file_name], file_name)
+                return f"❌ Please upload file {i+1}"
+            
+            # Check file size (limit to 200MB per file)
+            try:
+                file_size = os.path.getsize(file.name) / (1024 * 1024)  # Size in MB
+                if file_size > 200:
+                    return f"❌ File {i+1} too large ({file_size:.1f}MB). Please use a smaller sample."
+            except:
+                pass  # Continue if can't check size
+                
+            try:
+                df = pd.read_csv(file.name, nrows=1)
+                missing = [col for col in cols if col not in df.columns]
+                if missing:
+                    return f"❌ File {i+1} missing columns: {missing}"
+            except Exception as e:
+                return f"❌ File {i+1} error: {str(e)}"
+        return None
+    
+    def load_large_file(self, file_path, columns=None, sample_frac=0.1):
+        """Load large files efficiently with sampling"""
+        try:
+            # First, get file size and row count estimate
+            with open(file_path, 'r') as f:
+                first_line = f.readline()
+                
+            # For very large files, sample during loading
+            if os.path.getsize(file_path) > 50 * 1024 * 1024:  # > 50MB
+                print(f"📊 Large file detected, sampling {sample_frac*100:.0f}% of data...")
+                
+                # Read in chunks and sample
+                chunks = []
+                chunk_iter = pd.read_csv(file_path, chunksize=self.chunk_size, usecols=columns)
+                
+                for i, chunk in enumerate(chunk_iter):
+                    # Sample from each chunk
+                    sampled_chunk = chunk.sample(frac=sample_frac, random_state=42)
+                    chunks.append(sampled_chunk)
+                    
+                    # Limit total chunks to control memory
+                    if i >= 20:  # Max 20 chunks
+                        break
+                
+                return pd.concat(chunks, ignore_index=True)
+            else:
+                # Load normally for smaller files
+                return pd.read_csv(file_path, usecols=columns)
+                
+        except Exception as e:
+            print(f"Error loading {file_path}: {e}")
+            return pd.read_csv(file_path, usecols=columns, nrows=10000)  # Fallback
+    
+    def run_analysis(self, orders_file, order_products_file, products_file, aisles_file):
+        """Main analysis function with optimized processing"""
+        try:
+            # Validate inputs
+            files = [orders_file, order_products_file, products_file, aisles_file]
+            required_cols = [
+                ['order_id', 'user_id'],
+                ['order_id', 'product_id'], 
+                ['product_id', 'product_name', 'aisle_id'],
+                ['aisle_id', 'aisle']
+            ]
+            
+            error = self.validate_files(files, required_cols)
             if error:
                 return error, "", "", "", ""
-        
-        # Load datasets
-        print("Loading datasets...")
-        orders = pd.read_csv(file_paths[0])
-        order_products = pd.read_csv(file_paths[1])
-        products = pd.read_csv(file_paths[2])
-        aisles = pd.read_csv(file_paths[3])
-        
-        # Clean product and aisle names
-        products = clean_column_names(products, 'product_name')
-        aisles = clean_column_names(aisles, 'aisle')
-        
-        # Sample data for performance (adjust based on dataset size)
-        max_orders = 15000
-        if len(orders) > max_orders:
-            sample_orders = orders.sample(n=max_orders, random_state=42)
-            order_products = order_products[order_products['order_id'].isin(sample_orders['order_id'])]
-        
-        # Merge datasets
-        merged_data = order_products.merge(orders[['order_id', 'user_id']], on='order_id', how='left')
-        merged_data = merged_data.merge(products, on='product_id', how='left')
-        merged_data = merged_data.merge(aisles, on='aisle_id', how='left')
-        
-        # Clean data
-        merged_data = merged_data.dropna(subset=['user_id', 'aisle', 'product_name'])
-        
-        if merged_data.empty:
-            return "❌ No valid data after merging datasets.", "", "", "", ""
-        
-        print(f"Processing {len(merged_data)} records from {len(merged_data['user_id'].unique())} customers...")
-        
-        # --- MARKET BASKET ANALYSIS ---
-        apriori_result = ""
-        try:
-            # Create basket matrix
-            basket_data = merged_data.groupby(['order_id', 'product_name']).size().unstack(fill_value=0)
             
-            if basket_data.empty or basket_data.shape[0] < 20:
-                apriori_result = "❌ Insufficient data for market basket analysis (minimum 20 orders required)."
-            else:
-                # Convert to boolean matrix
-                basket_sets = basket_data > 0
-                
-                # Apply Apriori algorithm
-                frequent_itemsets = apriori(basket_sets, min_support=0.01, use_colnames=True, max_len=3)
-                
-                if frequent_itemsets.empty:
-                    # Try with lower support
-                    frequent_itemsets = apriori(basket_sets, min_support=0.005, use_colnames=True, max_len=2)
-                
-                if frequent_itemsets.empty:
-                    apriori_result = "❌ No frequent itemsets found. Dataset may be too sparse."
-                else:
-                    # Generate association rules
-                    rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.0)
-                    
-                    if rules.empty:
-                        apriori_result = "❌ No association rules found with current thresholds."
-                    else:
-                        # Filter and sort rules
-                        rules_filtered = rules[(rules['confidence'] >= 0.4) & (rules['lift'] >= 1.2)]
-                        
-                        if rules_filtered.empty:
-                            # Try with lower thresholds
-                            rules_filtered = rules[(rules['confidence'] >= 0.3) & (rules['lift'] >= 1.1)]
-                        
-                        if rules_filtered.empty:
-                            rules_filtered = rules.sort_values('lift', ascending=False).head(10)
-                        else:
-                            rules_filtered = rules_filtered.sort_values('lift', ascending=False).head(15)
-                        
-                        if not rules_filtered.empty:
-                            rules_text = []
-                            rules_text.append(f"📊 **MARKET BASKET ANALYSIS RESULTS**\n")
-                            rules_text.append(f"Found {len(rules_filtered)} strong association rules:\n\n")
-                            
-                            for i, (_, row) in enumerate(rules_filtered.iterrows(), 1):
-                                antecedents = ', '.join(list(row['antecedents']))
-                                consequents = ', '.join(list(row['consequents']))
-                                rules_text.append(
-                                    f"{i}. **{antecedents}** ➜ **{consequents}**\n"
-                                    f"   • Support: {row['support']:.3f} ({row['support']*100:.1f}% of transactions)\n"
-                                    f"   • Confidence: {row['confidence']:.3f} ({row['confidence']*100:.1f}% success rate)\n"
-                                    f"   • Lift: {row['lift']:.3f} ({row['lift']:.1f}x more likely)\n\n"
-                                )
-                            apriori_result = ''.join(rules_text)
-                        else:
-                            apriori_result = "❌ No strong association patterns found in the dataset."
+            print("📊 Loading data efficiently...")
+            
+            # Load with memory optimization and sampling for large files
+            orders = self.load_large_file(orders_file.name, 
+                                        columns=['order_id', 'user_id'], 
+                                        sample_frac=0.3)
+            
+            # Sample orders early to reduce downstream processing
+            if len(orders) > self.max_orders:
+                orders = orders.sample(n=self.max_orders, random_state=42)
+                print(f"📉 Sampled to {len(orders)} orders for analysis")
+            
+            # Load order_products with filtering
+            print("📦 Loading order products...")
+            order_products = self.load_large_file(order_products_file.name, 
+                                                columns=['order_id', 'product_id'],
+                                                sample_frac=0.2)
+            
+            # Filter to sampled orders immediately to save memory
+            order_products = order_products[order_products['order_id'].isin(orders['order_id'])]
+            print(f"🔍 Filtered to {len(order_products)} order items")
+            
+            # Load smaller reference files normally
+            products = pd.read_csv(products_file.name)
+            aisles = pd.read_csv(aisles_file.name)
+            
+            # Clean names
+            products = self.clean_names(products, 'product_name')
+            aisles = self.clean_names(aisles, 'aisle')
+            
+            print(f"📈 Processing {len(order_products)} order items...")
+            
+            # Merge data efficiently
+            data = (order_products
+                   .merge(orders, on='order_id')
+                   .merge(products, on='product_id')
+                   .merge(aisles, on='aisle_id')
+                   .dropna())
+            
+            if data.empty:
+                return "❌ No valid data after merging", "", "", "", ""
+            
+            # Market Basket Analysis
+            market_analysis = self.analyze_market_basket(data)
+            
+            # Customer Clustering  
+            cluster_analysis, visualization = self.analyze_customers(data)
+            
+            # Generate recommendations
+            cross_sell = self.generate_cross_sell_recommendations(market_analysis)
+            upsell = self.generate_upsell_recommendations(cluster_analysis)
+            
+            return market_analysis, cluster_analysis, visualization, cross_sell, upsell
+            
         except Exception as e:
-            apriori_result = f"❌ Error in market basket analysis: {str(e)}"
-        
-        # --- CUSTOMER CLUSTERING ---
-        cluster_result = ""
-        viz_html = ""
-        
+            print(f"❌ Analysis error: {e}")
+            return f"❌ Analysis failed: {str(e)}", "", "", "", ""
+    
+    def analyze_market_basket(self, data):
+        """Optimized market basket analysis"""
         try:
-            # Create customer-aisle purchase matrix
-            customer_aisle_data = merged_data.groupby(['user_id', 'aisle']).size().unstack(fill_value=0)
+            print("🛒 Running market basket analysis...")
             
-            if customer_aisle_data.empty or customer_aisle_data.shape[0] < 10:
-                cluster_result = f"❌ Not enough customers for clustering (found {customer_aisle_data.shape[0]}, minimum 10 required)."
-            else:
-                print(f"Customer-aisle matrix shape: {customer_aisle_data.shape}")
-                
-                # Remove columns with all zeros
-                customer_aisle_data = customer_aisle_data.loc[:, (customer_aisle_data != 0).any(axis=0)]
-                
-                if customer_aisle_data.shape[1] < 2:
-                    cluster_result = "❌ Not enough diverse aisles for meaningful clustering."
-                else:
-                    # Scale features
-                    scaler = StandardScaler()
-                    customer_features_scaled = scaler.fit_transform(customer_aisle_data)
-                    
-                    # Handle non-finite values
-                    customer_features_scaled = np.nan_to_num(customer_features_scaled, 0)
-                    
-                    # Determine optimal number of clusters
-                    n_clusters = min(6, max(3, customer_aisle_data.shape[0] // 20))
-                    
-                    print(f"Using {n_clusters} clusters for {customer_aisle_data.shape[0]} customers")
-                    
-                    # Apply K-means clustering
-                    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=300)
-                    clusters = kmeans.fit_predict(customer_features_scaled)
-                    
-                    # Create cluster summary
-                    customer_aisle_with_clusters = customer_aisle_data.copy()
-                    customer_aisle_with_clusters['cluster'] = clusters
-                    
-                    cluster_summary = customer_aisle_with_clusters.groupby('cluster').mean()
-                    cluster_summary = cluster_summary.drop('cluster', axis=1, errors='ignore')
-                    
-                    # Generate cluster descriptions
-                    cluster_descriptions = []
-                    cluster_descriptions.append("👥 **CUSTOMER SEGMENTATION RESULTS**\n\n")
-                    
-                    for cluster_id in range(n_clusters):
-                        cluster_customers = sum(clusters == cluster_id)
-                        if cluster_customers > 0:
-                            top_aisles = cluster_summary.iloc[cluster_id].nlargest(5)
-                            top_aisles = top_aisles[top_aisles > 0.5]  # Filter meaningful purchases
-                            
-                            if len(top_aisles) > 0:
-                                aisle_desc = ', '.join([f'{aisle.replace("_", " ").title()} ({score:.1f})' 
-                                                      for aisle, score in top_aisles.items()])
-                                cluster_descriptions.append(
-                                    f"**🏷️ Cluster {cluster_id}** - {cluster_customers} customers ({cluster_customers/len(clusters)*100:.1f}%)\n"
-                                    f"Primary shopping categories: {aisle_desc}\n"
-                                    f"Behavior: {'Heavy shoppers' if top_aisles.iloc[0] > 5 else 'Moderate shoppers' if top_aisles.iloc[0] > 2 else 'Light shoppers'}\n\n"
-                                )
-                    
-                    cluster_result = ''.join(cluster_descriptions) if cluster_descriptions else "❌ Unable to generate cluster descriptions."
-                    
-                    # Create visualization
-                    viz_data = create_visualization(clusters, cluster_summary)
-                    if viz_data:
-                        viz_html = f'<img src="{viz_data}" style="max-width:100%; height:auto;">'
-        
+            # Create transaction matrix
+            basket = (data.groupby(['order_id', 'product_name'])
+                     .size().unstack(fill_value=0) > 0)
+            
+            if basket.shape[0] < 20:
+                return "❌ Need at least 20 orders for analysis"
+            
+            # Run Apriori with lower thresholds for speed
+            frequent_items = apriori(basket, min_support=0.02, max_len=2)
+            
+            if frequent_items.empty:
+                return "❌ No frequent patterns found"
+            
+            # Generate rules
+            rules = association_rules(frequent_items, metric="confidence", min_threshold=0.3)
+            
+            if rules.empty:
+                return "❌ No association rules found"
+            
+            # Format results
+            rules = rules.sort_values('lift', ascending=False).head(10)
+            
+            result = ["📊 **MARKET BASKET ANALYSIS**\n"]
+            result.append(f"Found {len(rules)} association rules:\n")
+            
+            for i, (_, rule) in enumerate(rules.iterrows(), 1):
+                ant = ', '.join(rule['antecedents'])
+                con = ', '.join(rule['consequents'])
+                result.append(f"{i}. {ant} → {con}")
+                result.append(f"   Confidence: {rule['confidence']:.2%}, Lift: {rule['lift']:.2f}\n")
+            
+            return '\n'.join(result)
+            
         except Exception as e:
-            cluster_result = f"❌ Error in customer clustering: {str(e)}"
-        
-        # --- GENERATE RECOMMENDATIONS ---
-        cross_sell_recs = []
-        upsell_recs = []
-        
-        # Cross-selling recommendations
-        if 'rules_filtered' in locals() and not rules_filtered.empty:
-            cross_sell_recs.append("🎯 **CROSS-SELLING OPPORTUNITIES**\n\n")
-            cross_sell_recs.append("*Recommend these product combinations to increase basket size:*\n\n")
+            return f"❌ Market basket error: {str(e)}"
+    
+    def analyze_customers(self, data):
+        """Optimized customer clustering"""
+        try:
+            print("👥 Analyzing customer segments...")
             
-            for i, (_, rule) in enumerate(rules_filtered.head(5).iterrows(), 1):
-                antecedents = ', '.join(list(rule['antecedents'])).replace('_', ' ').title()
-                consequents = ', '.join(list(rule['consequents'])).replace('_', ' ').title()
-                cross_sell_recs.append(
-                    f"**{i}. Bundle Opportunity:** {antecedents} + {consequents}\n"
-                    f"   • Success Rate: {rule['confidence']:.1%}\n"
-                    f"   • Impact: {rule['lift']:.2f}x more likely to buy together\n"
-                    f"   • Action: Create bundle offers, place items nearby\n\n"
-                )
-        else:
-            cross_sell_recs.append("❌ No strong cross-selling patterns identified. Consider collecting more transaction data.")
-        
-        # Upselling recommendations
-        if 'cluster_summary' in locals() and not cluster_summary.empty:
-            upsell_recs.append("📈 **UPSELLING STRATEGIES**\n\n")
-            upsell_recs.append("*Target premium products to these customer segments:*\n\n")
+            # Customer-aisle matrix
+            customer_matrix = (data.groupby(['user_id', 'aisle'])
+                             .size().unstack(fill_value=0))
             
-            for cluster_id in range(n_clusters):
-                if cluster_id < len(cluster_summary):
-                    top_aisles = cluster_summary.iloc[cluster_id].nlargest(3)
-                    top_aisles = top_aisles[top_aisles > 1]  # Meaningful purchase frequency
-                    customer_count = sum(clusters == cluster_id)
-                    
-                    if len(top_aisles) > 0 and customer_count > 0:
-                        aisle_names = ', '.join([aisle.replace('_', ' ').title() for aisle in top_aisles.index[:2]])
-                        avg_purchases = top_aisles.iloc[0]
-                        
-                        strategy = "Premium product promotions" if avg_purchases > 5 else "Value-added bundles" if avg_purchases > 2 else "Entry-level upgrades"
-                        
-                        upsell_recs.append(
-                            f"**Cluster {cluster_id}** ({customer_count} customers):\n"
-                            f"   • Primary interests: {aisle_names}\n"
-                            f"   • Strategy: {strategy}\n"
-                            f"   • Approach: Target with higher-margin alternatives\n\n"
-                        )
-        else:
-            upsell_recs.append("❌ Customer segmentation needed for targeted upselling strategies.")
+            if customer_matrix.shape[0] < 10:
+                return "❌ Need more customers for clustering", ""
+            
+            # Scale and cluster
+            scaler = StandardScaler()
+            scaled_data = scaler.fit_transform(customer_matrix)
+            
+            n_clusters = min(5, customer_matrix.shape[0] // 10)
+            n_clusters = max(2, n_clusters)
+            
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=5)
+            clusters = kmeans.fit_predict(scaled_data)
+            
+            # Analyze clusters
+            customer_matrix['cluster'] = clusters
+            cluster_summary = customer_matrix.groupby('cluster').mean().drop('cluster', axis=1)
+            
+            # Generate description
+            result = ["👥 **CUSTOMER SEGMENTS**\n"]
+            
+            for i in range(n_clusters):
+                count = sum(clusters == i)
+                top_aisles = cluster_summary.iloc[i].nlargest(3)
+                top_aisles = top_aisles[top_aisles > 0]
+                
+                if len(top_aisles) > 0:
+                    aisles_str = ', '.join(top_aisles.index)
+                    result.append(f"**Segment {i+1}** ({count} customers):")
+                    result.append(f"Primary interests: {aisles_str}\n")
+            
+            # Create simple visualization
+            viz = self.create_visualization(clusters, cluster_summary)
+            
+            return '\n'.join(result), viz
+            
+        except Exception as e:
+            return f"❌ Clustering error: {str(e)}", ""
+    
+    def create_visualization(self, clusters, cluster_summary):
+        """Create lightweight visualization"""
+        try:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            
+            # Simple bar chart of cluster sizes
+            cluster_counts = pd.Series(clusters).value_counts().sort_index()
+            bars = ax.bar(range(len(cluster_counts)), cluster_counts.values, 
+                         color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'][:len(cluster_counts)])
+            
+            ax.set_title('Customer Segments Distribution', fontsize=14, fontweight='bold')
+            ax.set_xlabel('Segment')
+            ax.set_ylabel('Number of Customers')
+            ax.set_xticks(range(len(cluster_counts)))
+            ax.set_xticklabels([f'Segment {i+1}' for i in cluster_counts.index])
+            
+            # Add value labels
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{int(height)}', ha='center', va='bottom', fontweight='bold')
+            
+            plt.tight_layout()
+            
+            # Convert to base64
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+            buffer.seek(0)
+            img_str = base64.b64encode(buffer.read()).decode()
+            plt.close()
+            
+            return f'<img src="data:image/png;base64,{img_str}" style="max-width:100%;">'
+            
+        except Exception as e:
+            print(f"Visualization error: {e}")
+            return ""
+    
+    def generate_cross_sell_recommendations(self, analysis):
+        """Generate cross-selling recommendations"""
+        if "❌" in analysis:
+            return "❌ Cross-selling analysis unavailable"
         
-        cross_sell_text = ''.join(cross_sell_recs)
-        upsell_text = ''.join(upsell_recs)
-        
-        return apriori_result, cluster_result, viz_html, cross_sell_text, upsell_text
-        
-    except Exception as e:
-        error_msg = f"❌ Unexpected error: {str(e)}\n\nPlease ensure all files are valid CSV files with correct structure."
-        print(f"Full error: {e}")
-        return error_msg, "", "", "", ""
+        return """🎯 **CROSS-SELLING RECOMMENDATIONS**
 
-# Create Gradio interface with updated components
-def create_interface():
-    with gr.Blocks(title="🛒 Market Basket Analysis Dashboard", theme=gr.themes.Soft()) as interface:
-        gr.Markdown("""
-        # 🛒 Market Basket Analysis Dashboard
+**Strategy 1: Product Bundles**
+- Create bundles from frequently bought-together items
+- Offer discounts for bundle purchases
+- Place complementary products nearby
+
+**Strategy 2: Recommendation Engine**
+- Show "customers who bought X also bought Y" 
+- Implement in-store displays and online recommendations
+- Train staff on complementary product suggestions
+
+**Strategy 3: Targeted Promotions**
+- Send personalized offers based on purchase history
+- Create seasonal bundles for high-lift combinations
+- Use email marketing for cross-sell opportunities"""
+    
+    def generate_upsell_recommendations(self, analysis):
+        """Generate upselling recommendations"""
+        if "❌" in analysis:
+            return "❌ Upselling analysis unavailable"
         
-        Upload your retail transaction data to discover purchasing patterns and generate actionable insights for cross-selling and upselling.
-        
-        ### 📋 Required Files:
-        1. **orders.csv** - Order information (order_id, user_id)
-        2. **order_products.csv** - Products in each order (order_id, product_id)  
-        3. **products.csv** - Product details (product_id, product_name, aisle_id)
-        4. **aisles.csv** - Aisle information (aisle_id, aisle)
-        
-        ### 🚀 What you'll get:
-        - **Association Rules**: Which products are frequently bought together
-        - **Customer Segments**: Different types of shoppers in your data
-        - **Cross-selling Ideas**: Product bundle recommendations  
-        - **Upselling Strategies**: How to increase average order value
+        return """📈 **UPSELLING STRATEGIES**
+
+**Strategy 1: Customer Segmentation**
+- Target high-value segments with premium products
+- Create loyalty programs for frequent shoppers  
+- Offer exclusive products to top customers
+
+**Strategy 2: Category Expansion**
+- Introduce premium alternatives in popular categories
+- Create "good-better-best" product tiers
+- Highlight value-added features
+
+**Strategy 3: Behavioral Targeting**
+- Track purchase patterns to identify upgrade opportunities
+- Time promotions with natural buying cycles
+- Use data to personalize upgrade offers"""
+
+def create_streamlined_interface():
+    """Create fast-loading interface with progress tracking"""
+    analyzer = MarketBasketAnalyzer()
+    
+    with gr.Blocks(title="Market Basket Analysis", theme=gr.themes.Soft()) as app:
+        gr.HTML("""
+        <div style="text-align: center; padding: 20px;">
+            <h1>🛒 Market Basket Analysis Dashboard</h1>
+            <p>Upload your transaction data to discover purchasing patterns and generate insights</p>
+            <p><strong>📝 Note:</strong> Large files will be automatically sampled for faster processing</p>
+        </div>
         """)
         
+        with gr.Accordion("📋 File Requirements", open=False):
+            gr.Markdown("""
+            **Required CSV files:**
+            1. **orders.csv** - Order information (columns: order_id, user_id)
+            2. **order_products.csv** - Products in each order (columns: order_id, product_id)  
+            3. **products.csv** - Product details (columns: product_id, product_name, aisle_id)
+            4. **aisles.csv** - Aisle information (columns: aisle_id, aisle)
+            
+            **💡 Tips for large files:**
+            - Files over 50MB will be automatically sampled for performance
+            - Maximum file size: 200MB per file
+            - Processing time: 30-60 seconds for large datasets
+            """)
+        
         with gr.Row():
-            with gr.Column():
-                orders_file = gr.File(label="📊 orders.csv", file_types=[".csv"])
-                order_products_file = gr.File(label="🛍️ order_products.csv", file_types=[".csv"])
-            with gr.Column():
-                products_file = gr.File(label="📦 products.csv", file_types=[".csv"])
-                aisles_file = gr.File(label="🏪 aisles.csv", file_types=[".csv"])
+            orders_file = gr.File(label="📊 Orders CSV", file_types=[".csv"])
+            order_products_file = gr.File(label="🛍️ Order Products CSV", file_types=[".csv"])
+            products_file = gr.File(label="📦 Products CSV", file_types=[".csv"])
+            aisles_file = gr.File(label="🏪 Aisles CSV", file_types=[".csv"])
         
         analyze_btn = gr.Button("🔍 Analyze Data", variant="primary", size="lg")
         
-        with gr.Tabs():
-            with gr.TabItem("📊 Association Rules"):
-                apriori_output = gr.Markdown()
-            
-            with gr.TabItem("👥 Customer Segments"):
-                with gr.Row():
-                    with gr.Column():
-                        cluster_output = gr.Markdown()
-                    with gr.Column():
-                        viz_output = gr.HTML()
-            
-            with gr.TabItem("💡 Recommendations"):
-                with gr.Row():
-                    with gr.Column():
-                        cross_sell_output = gr.Markdown()
-                    with gr.Column():
-                        upsell_output = gr.Markdown()
+        # Add a status indicator
+        status_text = gr.Textbox(label="📊 Analysis Status", value="Ready to analyze...", interactive=False)
+        
+        with gr.Row():
+            with gr.Column():
+                market_output = gr.Textbox(label="Market Basket Results", lines=10)
+                cross_sell_output = gr.Textbox(label="Cross-Selling Strategy", lines=8)
+            with gr.Column():
+                cluster_output = gr.Textbox(label="Customer Segments", lines=10)
+                upsell_output = gr.Textbox(label="Upselling Strategy", lines=8)
+        
+        viz_output = gr.HTML(label="Visualization")
+        
+        def update_status(status):
+            return status
+        
+        def run_with_progress(*args):
+            """Run analysis with progress updates"""
+            try:
+                # Update status
+                yield "🔄 Starting analysis...", "", "", "", "", ""
+                
+                # Run the actual analysis
+                results = analyzer.run_analysis(*args)
+                
+                # Final results
+                yield "✅ Analysis complete!", *results
+                
+            except Exception as e:
+                yield f"❌ Error: {str(e)}", "", "", "", "", ""
         
         analyze_btn.click(
-            fn=process_data,
+            fn=run_with_progress,
             inputs=[orders_file, order_products_file, products_file, aisles_file],
-            outputs=[apriori_output, cluster_output, viz_output, cross_sell_output, upsell_output]
+            outputs=[status_text, market_output, cluster_output, viz_output, cross_sell_output, upsell_output]
         )
     
-    return interface
+    return app
 
 if __name__ == "__main__":
-    print("🚀 Starting Market Basket Analysis Dashboard...")
-    
     try:
-        app = create_interface()
+        print("✅ Creating interface...")
+        app = create_streamlined_interface()
+        
+        print("✅ Interface created, starting server...")
+        
+        # Get port from environment
+        port = int(os.environ.get("PORT", 8080))
+        
+        # Launch with optimized settings for large file uploads
         app.launch(
-            server_name="0.0.0.0",  # Changed for deployment compatibility
-            server_port=int(os.environ.get("PORT", 7860)),  # Use environment PORT or default
+            server_name="0.0.0.0",
+            server_port=port,
             share=False,
-            show_error=True
+            show_error=True,
+            quiet=True,
+            favicon_path=None,
+            show_tips=False,
+            enable_queue=True,  # Enable queue for large files
+            max_threads=5,
+            max_file_size="500mb"  # Increase file size limit
         )
+        
+        print(f"✅ Server started on port {port}")
+        
     except Exception as e:
-        print(f"❌ Failed to launch application: {e}")
-        print("Please check your Gradio installation and try again.")
-
+        print(f"❌ Startup failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
