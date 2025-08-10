@@ -83,8 +83,8 @@ class OptimizedMarketBasketAnalyzer:
             
             # Check file size
             file_size = self.get_file_size_mb(file.name)
-            if file_size > 300:
-                return f"❌ {name} too large ({file_size:.1f}MB). Max 300MB per file."
+            if file_size > 800:
+                return f"❌ {name} too large ({file_size:.1f}MB). Max 800MB per file."
             
             try:
                 # Quick structure validation
@@ -555,7 +555,7 @@ def create_production_interface():
             | **aisles.csv** | `aisle_id`, `aisle` | Product category/aisle information |
             
             **💡 Performance Tips:**
-            - Files up to 300MB supported with automatic optimization
+            - Files up to 800MB supported with automatic optimization
             - Large datasets are intelligently sampled for faster processing
             - Analysis typically completes in 30-90 seconds
             - Results include visualizations and actionable recommendations
