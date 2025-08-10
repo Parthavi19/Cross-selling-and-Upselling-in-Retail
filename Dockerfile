@@ -23,6 +23,8 @@ FROM python:3.11-slim
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    libfreetype6-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -63,14 +65,17 @@ ENV MKL_NUM_THREADS=2
 # Expose port
 EXPOSE 8080
 
-# Health check with proper timeout
-HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:8080/health || curl -f http://localhost:8080/ || exit 1
+# Health check with extended start period
+HEALTHCHECK --interval=30s --timeout=30s --start-period=300s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Use non-root user for security
 RUN useradd --create-home --shell /bin/bash app
 RUN chown -R app:app /app /tmp/gradio
 USER app
+
+# Run the application
+CMD ["python", "-u", "app.py"]
 
 # Run the application
 CMD ["python", "-u", "app.py"]
