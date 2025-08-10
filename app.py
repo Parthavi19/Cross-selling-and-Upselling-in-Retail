@@ -2,9 +2,10 @@ import os
 import sys
 import warnings
 import logging
+from contextlib import asynccontextmanager
 
 # Configure logging and suppress warnings
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -17,527 +18,41 @@ os.environ["GRADIO_SHARE"] = "false"
 import matplotlib
 matplotlib.use('Agg')
 
-print("🚀 Starting Market Basket Analysis Dashboard...")
-print(f"Python version: {sys.version}")
-print(f"Port: {os.environ.get('PORT', 8080)}")
+logging.info("Starting Market Basket Analysis Dashboard")
+logging.info(f"Python version: {sys.version}")
+logging.info(f"Port: {os.environ.get('PORT', 8080)}")
 
 try:
-    import gradio as gr
+    from fastapi import FastAPI
     import tempfile
     import io
     import base64
     import gc
     from typing import Tuple, Optional
-    from fastapi import FastAPI
     
-    print("✅ All libraries imported successfully")
+    logging.info("Initial libraries imported successfully")
     
 except ImportError as e:
+    logging.error(f"Import error: {e}", exc_info=True)
     print(f"❌ Import error: {e}")
     sys.exit(1)
 
-# Initialize FastAPI for health check
-app_fastapi = FastAPI()
+# Initialize FastAPI with lifespan event handlers
+@asynccontextmanager
+async def lifespan(app):
+    logging.info("FastAPI startup complete")
+    yield
+    logging.info("FastAPI shutdown complete")
+
+app_fastapi = FastAPI(lifespan=lifespan)
 
 @app_fastapi.get("/health")
 async def health_check():
     return {"status": "healthy"}
 
-class OptimizedMarketBasketAnalyzer:
-    """Optimized analyzer for production deployment with large file handling"""
-    
-    def __init__(self):
-        self.max_orders = 8000
-        self.chunk_size = 5000
-        self.sample_rates = {
-            'orders': 0.4,
-            'order_products': 0.3,
-            'large_threshold': 50 * 1024 * 1024  # 50MB
-        }
-        
-    def get_file_size_mb(self, file_path: str) -> float:
-        """Get file size in MB"""
-        try:
-            return os.path.getsize(file_path) / (1024 * 1024)
-        except:
-            return 0
-    
-    def clean_product_names(self, df, column: str):
-        """Clean product/aisle names efficiently"""
-        import pandas as pd
-        if column in df.columns:
-            df[column] = (df[column]
-                         .astype(str)
-                         .str.lower()
-                         .str.replace(r'[^\w\s]', '', regex=True)
-                         .str.replace(r'\s+', '_', regex=True)
-                         .fillna('unknown'))
-        return df
-    
-    def validate_csv_files(self, files: list, required_columns: list) -> Optional[str]:
-        """Validate uploaded CSV files structure and size"""
-        import pandas as pd
-        file_names = ["orders.csv", "order_products.csv", "products.csv", "aisles.csv"]
-        
-        for i, (file, cols, name) in enumerate(zip(files, required_columns, file_names)):
-            if file is None:
-                return f"❌ Please upload {name}"
-            
-            # Check file size
-            file_size = self.get_file_size_mb(file.name)
-            if file_size > 300:
-                return f"❌ {name} too large ({file_size:.1f}MB). Max 300MB per file."
-            
-            try:
-                # Quick structure validation
-                test_df = pd.read_csv(file.name, nrows=5)
-                missing_cols = [col for col in cols if col not in test_df.columns]
-                if missing_cols:
-                    return f"❌ {name} missing columns: {', '.join(missing_cols)}"
-                    
-                # Check for empty files
-                if len(test_df) == 0:
-                    return f"❌ {name} appears to be empty"
-                    
-            except Exception as e:
-                return f"❌ Error reading {name}: {str(e)}"
-        
-        return None
-    
-    def load_file_smart(self, file_path: str, columns: list = None, sample_rate: float = 1.0):
-        """Smart file loading with automatic sampling for large files"""
-        import pandas as pd
-        file_size = self.get_file_size_mb(file_path)
-        
-        try:
-            if file_size > 50:  # Large file handling
-                print(f"📊 Large file detected ({file_size:.1f}MB), using chunked loading...")
-                
-                chunks = []
-                total_chunks = 0
-                
-                for chunk in pd.read_csv(file_path, chunksize=self.chunk_size, usecols=columns):
-                    if sample_rate < 1.0:
-                        chunk = chunk.sample(frac=sample_rate, random_state=42)
-                    chunks.append(chunk)
-                    total_chunks += 1
-                    
-                    # Limit memory usage
-                    if total_chunks >= 30:  # Max 30 chunks
-                        break
-                
-                result = pd.concat(chunks, ignore_index=True)
-                print(f"✅ Loaded {len(result)} rows from {total_chunks} chunks")
-                return result
-                
-            else:
-                # Normal loading for smaller files
-                df = pd.read_csv(file_path, usecols=columns)
-                if sample_rate < 1.0:
-                    df = df.sample(frac=sample_rate, random_state=42)
-                return df
-                
-        except Exception as e:
-            print(f"⚠️ Error loading file, trying fallback method: {e}")
-            # Fallback: load limited rows
-            return pd.read_csv(file_path, usecols=columns, nrows=10000)
-    
-    def analyze_market_basket(self, data) -> str:
-        """Perform market basket analysis with error handling"""
-        import pandas as pd
-        from mlxtend.frequent_patterns import apriori, association_rules
-        try:
-            print("🛒 Analyzing market basket patterns...")
-            
-            # Create transaction matrix
-            basket_df = (data.groupby(['order_id', 'product_name'])
-                        .size().unstack(fill_value=0))
-            
-            # Convert to boolean for Apriori
-            basket_bool = basket_df > 0
-            
-            print(f"📊 Analyzing {basket_bool.shape[0]} orders with {basket_bool.shape[1]} unique products")
-            
-            if basket_bool.shape[0] < 20:
-                return "❌ Need at least 20 orders for meaningful analysis"
-            
-            # Run Apriori with adaptive thresholds
-            min_support = max(0.01, 10 / basket_bool.shape[0])  # Adaptive threshold
-            frequent_itemsets = apriori(basket_bool, min_support=min_support, max_len=2, use_colnames=True)
-            
-            if frequent_itemsets.empty:
-                return "❌ No frequent item patterns found. Dataset may be too sparse."
-            
-            # Generate association rules
-            try:
-                rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.2)
-            except Exception:
-                rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.0)
-            
-            if rules.empty:
-                return "❌ No significant association rules found"
-            
-            # Filter and sort rules
-            good_rules = rules[
-                (rules['confidence'] >= 0.3) & 
-                (rules['lift'] >= 1.2) & 
-                (rules['support'] >= 0.01)
-            ].sort_values('lift', ascending=False).head(10)
-            
-            if good_rules.empty:
-                # Fallback with lower thresholds
-                good_rules = rules.sort_values('lift', ascending=False).head(8)
-            
-            # Format results
-            result_lines = [
-                "📊 **MARKET BASKET ANALYSIS RESULTS**\n",
-                f"Analyzed {basket_bool.shape[0]:,} orders with {basket_bool.shape[1]:,} unique products\n",
-                f"Found {len(good_rules)} significant association rules:\n"
-            ]
-            
-            for i, (_, rule) in enumerate(good_rules.iterrows(), 1):
-                antecedent = ', '.join(list(rule['antecedents']))
-                consequent = ', '.join(list(rule['consequents']))
-                
-                result_lines.append(
-                    f"**{i}. {antecedent}** → **{consequent}**\n"
-                    f"   • Support: {rule['support']:.3f} ({rule['support']*100:.1f}% of orders)\n"
-                    f"   • Confidence: {rule['confidence']:.3f} ({rule['confidence']*100:.1f}% success rate)\n"
-                    f"   • Lift: {rule['lift']:.2f}x (strength of association)\n\n"
-                )
-            
-            return ''.join(result_lines)
-            
-        except Exception as e:
-            return f"❌ Market basket analysis failed: {str(e)}\nTry with a smaller dataset or different file format."
-    
-    def analyze_customer_segments(self, data) -> Tuple[str, str]:
-        """Perform customer segmentation analysis"""
-        import pandas as pd
-        import numpy as np
-        from sklearn.cluster import KMeans
-        from sklearn.preprocessing import StandardScaler
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        try:
-            print("👥 Analyzing customer segments...")
-            
-            # Create customer-aisle purchase matrix
-            customer_aisle = (data.groupby(['user_id', 'aisle'])
-                            .size().unstack(fill_value=0))
-            
-            print(f"👤 Analyzing {customer_aisle.shape[0]} customers across {customer_aisle.shape[1]} aisles")
-            
-            if customer_aisle.shape[0] < 10:
-                return "❌ Need at least 10 customers for segmentation", ""
-            
-            # Remove zero-variance columns
-            customer_aisle = customer_aisle.loc[:, (customer_aisle != 0).any(axis=0)]
-            
-            if customer_aisle.shape[1] < 2:
-                return "❌ Need more diverse shopping patterns for segmentation", ""
-            
-            # Standardize features
-            scaler = StandardScaler()
-            scaled_features = scaler.fit_transform(customer_aisle)
-            
-            # Handle any remaining NaN/Inf values
-            scaled_features = np.nan_to_num(scaled_features, 0)
-            
-            # Determine optimal clusters
-            n_clusters = min(6, max(2, customer_aisle.shape[0] // 15))
-            
-            print(f"🎯 Creating {n_clusters} customer segments...")
-            
-            # Perform clustering
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=300)
-            cluster_labels = kmeans.fit_predict(scaled_features)
-            
-            # Analyze clusters
-            customer_aisle_with_clusters = customer_aisle.copy()
-            customer_aisle_with_clusters['cluster'] = cluster_labels
-            
-            cluster_profiles = customer_aisle_with_clusters.groupby('cluster').mean()
-            cluster_profiles = cluster_profiles.drop('cluster', axis=1, errors='ignore')
-            
-            # Generate segment descriptions
-            segment_descriptions = ["👥 **CUSTOMER SEGMENTATION RESULTS**\n\n"]
-            
-            for cluster_id in range(n_clusters):
-                cluster_size = sum(cluster_labels == cluster_id)
-                cluster_pct = (cluster_size / len(cluster_labels)) * 100
-                
-                # Get top shopping categories for this segment
-                top_categories = cluster_profiles.iloc[cluster_id].nlargest(4)
-                top_categories = top_categories[top_categories > 0.5]  # Filter meaningful categories
-                
-                if len(top_categories) > 0:
-                    categories_str = ', '.join([
-                        f"{cat.replace('_', ' ').title()} ({score:.1f})" 
-                        for cat, score in top_categories.items()
-                    ])
-                    
-                    # Determine segment type
-                    avg_intensity = top_categories.iloc[0]
-                    if avg_intensity > 8:
-                        segment_type = "Heavy Shoppers"
-                    elif avg_intensity > 4:
-                        segment_type = "Regular Shoppers"  
-                    elif avg_intensity > 1:
-                        segment_type = "Occasional Shoppers"
-                    else:
-                        segment_type = "Light Shoppers"
-                    
-                    segment_descriptions.append(
-                        f"**🏷️ Segment {cluster_id + 1}: {segment_type}**\n"
-                        f"Size: {cluster_size:,} customers ({cluster_pct:.1f}% of total)\n"
-                        f"Primary categories: {categories_str}\n"
-                        f"Shopping behavior: {self._get_behavior_insights(avg_intensity, top_categories)}\n\n"
-                    )
-            
-            # Create visualization
-            viz_html = self._create_segment_visualization(cluster_labels, cluster_profiles)
-            
-            return ''.join(segment_descriptions), viz_html
-            
-        except Exception as e:
-            return f"❌ Customer segmentation failed: {str(e)}", ""
-    
-    def _get_behavior_insights(self, intensity: float, categories) -> str:
-        """Generate behavioral insights for customer segments"""
-        if intensity > 8:
-            return f"High-frequency shoppers, strong preference for {categories.index[0].replace('_', ' ')}"
-        elif intensity > 4:
-            return f"Moderate shoppers with focus on {len(categories)} main categories"
-        elif intensity > 1:
-            return "Selective shoppers, likely price-conscious"
-        else:
-            return "Infrequent shoppers, potential for engagement campaigns"
-    
-    def _create_segment_visualization(self, clusters, profiles) -> str:
-        """Create customer segment visualization"""
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        import pandas as pd
-        try:
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-            
-            # Segment size distribution
-            cluster_counts = pd.Series(clusters).value_counts().sort_index()
-            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'][:len(cluster_counts)]
-            
-            bars = ax1.bar([f'Segment {i+1}' for i in cluster_counts.index], 
-                          cluster_counts.values, color=colors)
-            ax1.set_title('Customer Segment Distribution', fontweight='bold', fontsize=14)
-            ax1.set_xlabel('Segment')
-            ax1.set_ylabel('Number of Customers')
-            
-            # Add count labels on bars
-            for bar in bars:
-                height = bar.get_height()
-                ax1.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{int(height):,}', ha='center', va='bottom', fontweight='bold')
-            
-            # Category heatmap for top segments
-            top_categories = profiles.mean(axis=0).nlargest(min(8, profiles.shape[1]))
-            heatmap_data = profiles[top_categories.index]
-            
-            if not heatmap_data.empty:
-                # Clean category names for display
-                display_categories = [cat.replace('_', ' ').title() for cat in heatmap_data.columns]
-                heatmap_display = heatmap_data.copy()
-                heatmap_display.columns = display_categories
-                
-                sns.heatmap(heatmap_display.T, annot=True, cmap='YlOrRd', ax=ax2, 
-                           cbar_kws={'label': 'Purchase Frequency'}, fmt='.1f')
-                ax2.set_title('Shopping Patterns by Segment', fontweight='bold', fontsize=14)
-                ax2.set_xlabel('Segment')
-                ax2.set_ylabel('Product Category')
-            
-            plt.tight_layout()
-            
-            # Convert to base64 for web display
-            buffer = io.BytesIO()
-            plt.savefig(buffer, format='png', dpi=200, bbox_inches='tight', facecolor='white')
-            buffer.seek(0)
-            img_data = base64.b64encode(buffer.read()).decode()
-            plt.close()
-            
-            # Clean up memory
-            gc.collect()
-            
-            return f'<img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;">'
-            
-        except Exception as e:
-            print(f"Visualization error: {e}")
-            return "<p>⚠️ Visualization unavailable</p>"
-    
-    def generate_recommendations(self, market_result: str, segment_result: str) -> Tuple[str, str]:
-        """Generate actionable business recommendations"""
-        
-        # Cross-selling recommendations
-        if "❌" not in market_result and "association rules" in market_result.lower():
-            cross_sell = """🎯 **CROSS-SELLING STRATEGY**
-
-**Immediate Actions:**
-1. **Bundle Creation**: Package frequently bought-together items at slight discount
-2. **Store Layout**: Place complementary products in adjacent locations
-3. **Recommendation Engine**: Show "customers who bought X also bought Y"
-4. **Staff Training**: Educate sales team on high-lift product combinations
-
-**Digital Marketing:**
-• Personalized email campaigns featuring complementary products
-• Website recommendations based on cart contents  
-• Social media ads showcasing popular product combinations
-• Mobile app push notifications for bundle offers
-
-**Seasonal Opportunities:**
-• Create themed bundles around holidays and events
-• Adjust cross-sell recommendations based on seasonal patterns
-• Monitor and refresh bundle offerings monthly"""
-
-        else:
-            cross_sell = """🎯 **CROSS-SELLING STRATEGY**
-
-**Data-Driven Approach Needed:**
-Since specific product associations weren't found in current data, focus on:
-
-• **Collect More Data**: Increase transaction sample size for better patterns
-• **Category-Level Analysis**: Look for broader category relationships
-• **Customer Surveys**: Ask customers about product preferences
-• **A/B Testing**: Experiment with different product placements
-• **Seasonal Analysis**: Examine patterns across different time periods"""
-
-        # Upselling recommendations  
-        if "❌" not in segment_result and "segment" in segment_result.lower():
-            upsell = """📈 **UPSELLING STRATEGY**
-
-**Segment-Specific Approaches:**
-1. **Heavy Shoppers**: Target with premium products and exclusive items
-2. **Regular Shoppers**: Offer loyalty rewards for higher-value purchases
-3. **Occasional Shoppers**: Use limited-time promotions to increase frequency
-4. **Light Shoppers**: Focus on value propositions and starter packages
-
-**Tactical Implementation:**
-• **Email Segmentation**: Personalized offers based on shopping behavior
-• **Dynamic Pricing**: Show premium options to high-value segments
-• **Loyalty Programs**: Tier-based rewards encouraging larger purchases
-• **Product Recommendations**: AI-driven suggestions for higher-margin items
-
-**Success Metrics:**
-• Average order value increase by segment
-• Customer lifetime value improvement
-• Purchase frequency changes
-• Premium product adoption rates"""
-
-        else:
-            upsell = """📈 **UPSELLING STRATEGY**
-
-**Foundation Building:**
-Current segmentation needs refinement. Recommended steps:
-
-• **Enhanced Data Collection**: Gather more customer behavior data
-• **Purchase History Analysis**: Track individual customer journeys
-• **Value-Based Segmentation**: Group customers by spending patterns
-• **Demographic Integration**: Combine with customer demographic data
-• **Behavioral Tracking**: Monitor website/app engagement patterns"""
-
-        return cross_sell, upsell
-    
-    def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
-        """Main analysis pipeline with comprehensive error handling"""
-        import pandas as pd
-        try:
-            # Validation phase
-            files = [orders_file, order_products_file, products_file, aisles_file]
-            required_columns = [
-                ['order_id', 'user_id'],
-                ['order_id', 'product_id'],
-                ['product_id', 'product_name', 'aisle_id'], 
-                ['aisle_id', 'aisle']
-            ]
-            
-            validation_error = self.validate_csv_files(files, required_columns)
-            if validation_error:
-                return validation_error, "", "", "", ""
-            
-            print("✅ File validation passed")
-            
-            # Data loading phase
-            print("📊 Loading and processing data...")
-            
-            orders_df = self.load_file_smart(
-                orders_file.name, 
-                columns=['order_id', 'user_id'], 
-                sample_rate=self.sample_rates['orders']
-            )
-            
-            # Limit orders for performance
-            if len(orders_df) > self.max_orders:
-                orders_df = orders_df.sample(n=self.max_orders, random_state=42)
-                print(f"📉 Sampled to {len(orders_df):,} orders for analysis")
-            
-            # Load order products filtered by sampled orders
-            order_products_df = self.load_file_smart(
-                order_products_file.name,
-                columns=['order_id', 'product_id'],
-                sample_rate=self.sample_rates['order_products']
-            )
-            
-            # Filter to our order sample
-            order_products_df = order_products_df[
-                order_products_df['order_id'].isin(orders_df['order_id'])
-            ]
-            
-            print(f"🛍️ Processing {len(order_products_df):,} order items")
-            
-            # Load reference data
-            products_df = pd.read_csv(products_file.name)
-            aisles_df = pd.read_csv(aisles_file.name)
-            
-            # Clean reference data
-            products_df = self.clean_product_names(products_df, 'product_name')
-            aisles_df = self.clean_product_names(aisles_df, 'aisle')
-            
-            # Merge all data
-            print("🔄 Merging datasets...")
-            merged_data = (order_products_df
-                          .merge(orders_df[['order_id', 'user_id']], on='order_id', how='left')
-                          .merge(products_df, on='product_id', how='left')
-                          .merge(aisles_df, on='aisle_id', how='left')
-                          .dropna(subset=['user_id', 'product_name', 'aisle']))
-            
-            if merged_data.empty:
-                return "❌ No data remains after merging. Check file compatibility.", "", "", "", ""
-            
-            print(f"✅ Final dataset: {len(merged_data):,} records from {merged_data['user_id'].nunique():,} customers")
-            
-            # Analysis phase
-            print("🔍 Running market basket analysis...")
-            market_analysis = self.analyze_market_basket(merged_data)
-            
-            print("👥 Running customer segmentation...")
-            segment_analysis, visualization = self.analyze_customer_segments(merged_data)
-            
-            print("💡 Generating recommendations...")
-            cross_sell_recs, upsell_recs = self.generate_recommendations(market_analysis, segment_analysis)
-            
-            # Memory cleanup
-            del merged_data, order_products_df, orders_df
-            gc.collect()
-            
-            print("✅ Analysis complete!")
-            return market_analysis, segment_analysis, visualization, cross_sell_recs, upsell_recs
-            
-        except Exception as e:
-            error_msg = f"❌ Analysis failed: {str(e)}\n\nPlease check your files and try again."
-            print(f"Error details: {e}")
-            import traceback
-            traceback.print_exc()
-            return error_msg, "", "", "", ""
-
 def create_production_interface():
     """Create production-ready Gradio interface"""
+    import gradio as gr
     
     analyzer = OptimizedMarketBasketAnalyzer()
     
@@ -657,33 +172,522 @@ def create_production_interface():
     
     return app
 
+class OptimizedMarketBasketAnalyzer:
+    """Optimized analyzer for production deployment with large file handling"""
+    
+    def __init__(self):
+        self.max_orders = 8000
+        self.chunk_size = 5000
+        self.sample_rates = {
+            'orders': 0.4,
+            'order_products': 0.3,
+            'large_threshold': 50 * 1024 * 1024  # 50MB
+        }
+        
+    def get_file_size_mb(self, file_path: str) -> float:
+        """Get file size in MB"""
+        try:
+            return os.path.getsize(file_path) / (1024 * 1024)
+        except:
+            return 0
+    
+    def clean_product_names(self, df, column: str):
+        """Clean product/aisle names efficiently"""
+        import pandas as pd
+        if column in df.columns:
+            df[column] = (df[column]
+                         .astype(str)
+                         .str.lower()
+                         .str.replace(r'[^\w\s]', '', regex=True)
+                         .str.replace(r'\s+', '_', regex=True)
+                         .fillna('unknown'))
+        return df
+    
+    def validate_csv_files(self, files: list, required_columns: list) -> Optional[str]:
+        """Validate uploaded CSV files structure and size"""
+        import pandas as pd
+        file_names = ["orders.csv", "order_products.csv", "products.csv", "aisles.csv"]
+        
+        for i, (file, cols, name) in enumerate(zip(files, required_columns, file_names)):
+            if file is None:
+                return f"❌ Please upload {name}"
+            
+            # Check file size
+            file_size = self.get_file_size_mb(file.name)
+            if file_size > 300:
+                return f"❌ {name} too large ({file_size:.1f}MB). Max 300MB per file."
+            
+            try:
+                # Quick structure validation
+                test_df = pd.read_csv(file.name, nrows=5)
+                missing_cols = [col for col in cols if col not in test_df.columns]
+                if missing_cols:
+                    return f"❌ {name} missing columns: {', '.join(missing_cols)}"
+                    
+                # Check for empty files
+                if len(test_df) == 0:
+                    return f"❌ {name} appears to be empty"
+                    
+            except Exception as e:
+                return f"❌ Error reading {name}: {str(e)}"
+        
+        return None
+    
+    def load_file_smart(self, file_path: str, columns: list = None, sample_rate: float = 1.0):
+        """Smart file loading with automatic sampling for large files"""
+        import pandas as pd
+        file_size = self.get_file_size_mb(file_path)
+        
+        try:
+            if file_size > 50:  # Large file handling
+                logging.info(f"Large file detected ({file_size:.1f}MB), using chunked loading")
+                
+                chunks = []
+                total_chunks = 0
+                
+                for chunk in pd.read_csv(file_path, chunksize=self.chunk_size, usecols=columns):
+                    if sample_rate < 1.0:
+                        chunk = chunk.sample(frac=sample_rate, random_state=42)
+                    chunks.append(chunk)
+                    total_chunks += 1
+                    
+                    # Limit memory usage
+                    if total_chunks >= 30:  # Max 30 chunks
+                        break
+                
+                result = pd.concat(chunks, ignore_index=True)
+                logging.info(f"Loaded {len(result)} rows from {total_chunks} chunks")
+                return result
+                
+            else:
+                # Normal loading for smaller files
+                df = pd.read_csv(file_path, usecols=columns)
+                if sample_rate < 1.0:
+                    df = df.sample(frac=sample_rate, random_state=42)
+                return df
+                
+        except Exception as e:
+            logging.error(f"Error loading file, trying fallback method: {e}", exc_info=True)
+            # Fallback: load limited rows
+            return pd.read_csv(file_path, usecols=columns, nrows=10000)
+    
+    def analyze_market_basket(self, data) -> str:
+        """Perform market basket analysis with error handling"""
+        import pandas as pd
+        from mlxtend.frequent_patterns import apriori, association_rules
+        try:
+            logging.info("Analyzing market basket patterns")
+            
+            # Create transaction matrix
+            basket_df = (data.groupby(['order_id', 'product_name'])
+                        .size().unstack(fill_value=0))
+            
+            # Convert to boolean for Apriori
+            basket_bool = basket_df > 0
+            
+            logging.info(f"Analyzing {basket_bool.shape[0]} orders with {basket_bool.shape[1]} unique products")
+            
+            if basket_bool.shape[0] < 20:
+                return "❌ Need at least 20 orders for meaningful analysis"
+            
+            # Run Apriori with adaptive thresholds
+            min_support = max(0.01, 10 / basket_bool.shape[0])  # Adaptive threshold
+            frequent_itemsets = apriori(basket_bool, min_support=min_support, max_len=2, use_colnames=True)
+            
+            if frequent_itemsets.empty:
+                return "❌ No frequent item patterns found. Dataset may be too sparse."
+            
+            # Generate association rules
+            try:
+                rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.2)
+            except Exception:
+                rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.0)
+            
+            if rules.empty:
+                return "❌ No significant association rules found"
+            
+            # Filter and sort rules
+            good_rules = rules[
+                (rules['confidence'] >= 0.3) & 
+                (rules['lift'] >= 1.2) & 
+                (rules['support'] >= 0.01)
+            ].sort_values('lift', ascending=False).head(10)
+            
+            if good_rules.empty:
+                # Fallback with lower thresholds
+                good_rules = rules.sort_values('lift', ascending=False).head(8)
+            
+            # Format results
+            result_lines = [
+                "📊 **MARKET BASKET ANALYSIS RESULTS**\n",
+                f"Analyzed {basket_bool.shape[0]:,} orders with {basket_bool.shape[1]:,} unique products\n",
+                f"Found {len(good_rules)} significant association rules:\n"
+            ]
+            
+            for i, (_, rule) in enumerate(good_rules.iterrows(), 1):
+                antecedent = ', '.join(list(rule['antecedents']))
+                consequent = ', '.join(list(rule['consequents']))
+                
+                result_lines.append(
+                    f"**{i}. {antecedent}** → **{consequent}**\n"
+                    f"   • Support: {rule['support']:.3f} ({rule['support']*100:.1f}% of orders)\n"
+                    f"   • Confidence: {rule['confidence']:.3f} ({rule['confidence']*100:.1f}% success rate)\n"
+                    f"   • Lift: {rule['lift']:.2f}x (strength of association)\n\n"
+                )
+            
+            return ''.join(result_lines)
+            
+        except Exception as e:
+            logging.error(f"Market basket analysis failed: {str(e)}", exc_info=True)
+            return f"❌ Market basket analysis failed: {str(e)}\nTry with a smaller dataset or different file format."
+    
+    def analyze_customer_segments(self, data) -> Tuple[str, str]:
+        """Perform customer segmentation analysis"""
+        import pandas as pd
+        import numpy as np
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import StandardScaler
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        try:
+            logging.info("Analyzing customer segments")
+            
+            # Create customer-aisle purchase matrix
+            customer_aisle = (data.groupby(['user_id', 'aisle'])
+                            .size().unstack(fill_value=0))
+            
+            logging.info(f"Analyzing {customer_aisle.shape[0]} customers across {customer_aisle.shape[1]} aisles")
+            
+            if customer_aisle.shape[0] < 10:
+                return "❌ Need at least 10 customers for segmentation", ""
+            
+            # Remove zero-variance columns
+            customer_aisle = customer_aisle.loc[:, (customer_aisle != 0).any(axis=0)]
+            
+            if customer_aisle.shape[1] < 2:
+                return "❌ Need more diverse shopping patterns for segmentation", ""
+            
+            # Standardize features
+            scaler = StandardScaler()
+            scaled_features = scaler.fit_transform(customer_aisle)
+            
+            # Handle any remaining NaN/Inf values
+            scaled_features = np.nan_to_num(scaled_features, 0)
+            
+            # Determine optimal clusters
+            n_clusters = min(6, max(2, customer_aisle.shape[0] // 15))
+            
+            logging.info(f"Creating {n_clusters} customer segments")
+            
+            # Perform clustering
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=300)
+            cluster_labels = kmeans.fit_predict(scaled_features)
+            
+            # Analyze clusters
+            customer_aisle_with_clusters = customer_aisle.copy()
+            customer_aisle_with_clusters['cluster'] = cluster_labels
+            
+            cluster_profiles = customer_aisle_with_clusters.groupby('cluster').mean()
+            cluster_profiles = cluster_profiles.drop('cluster', axis=1, errors='ignore')
+            
+            # Generate segment descriptions
+            segment_descriptions = ["👥 **CUSTOMER SEGMENTATION RESULTS**\n\n"]
+            
+            for cluster_id in range(n_clusters):
+                cluster_size = sum(cluster_labels == cluster_id)
+                cluster_pct = (cluster_size / len(cluster_labels)) * 100
+                
+                # Get top shopping categories for this segment
+                top_categories = cluster_profiles.iloc[cluster_id].nlargest(4)
+                top_categories = top_categories[top_categories > 0.5]  # Filter meaningful categories
+                
+                if len(top_categories) > 0:
+                    categories_str = ', '.join([
+                        f"{cat.replace('_', ' ').title()} ({score:.1f})" 
+                        for cat, score in top_categories.items()
+                    ])
+                    
+                    # Determine segment type
+                    avg_intensity = top_categories.iloc[0]
+                    if avg_intensity > 8:
+                        segment_type = "Heavy Shoppers"
+                    elif avg_intensity > 4:
+                        segment_type = "Regular Shoppers"  
+                    elif avg_intensity > 1:
+                        segment_type = "Occasional Shoppers"
+                    else:
+                        segment_type = "Light Shoppers"
+                    
+                    segment_descriptions.append(
+                        f"**🏷️ Segment {cluster_id + 1}: {segment_type}**\n"
+                        f"Size: {cluster_size:,} customers ({cluster_pct:.1f}% of total)\n"
+                        f"Primary categories: {categories_str}\n"
+                        f"Shopping behavior: {self._get_behavior_insights(avg_intensity, top_categories)}\n\n"
+                    )
+            
+            # Create visualization
+            viz_html = self._create_segment_visualization(cluster_labels, cluster_profiles)
+            
+            return ''.join(segment_descriptions), viz_html
+            
+        except Exception as e:
+            logging.error(f"Customer segmentation failed: {str(e)}", exc_info=True)
+            return f"❌ Customer segmentation failed: {str(e)}", ""
+    
+    def _get_behavior_insights(self, intensity: float, categories) -> str:
+        """Generate behavioral insights for customer segments"""
+        if intensity > 8:
+            return f"High-frequency shoppers, strong preference for {categories.index[0].replace('_', ' ')}"
+        elif intensity > 4:
+            return f"Moderate shoppers with focus on {len(categories)} main categories"
+        elif intensity > 1:
+            return "Selective shoppers, likely price-conscious"
+        else:
+            return "Infrequent shoppers, potential for engagement campaigns"
+    
+    def _create_segment_visualization(self, clusters, profiles) -> str:
+        """Create customer segment visualization"""
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import pandas as pd
+        try:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # Segment size distribution
+            cluster_counts = pd.Series(clusters).value_counts().sort_index()
+            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'][:len(cluster_counts)]
+            
+            bars = ax1.bar([f'Segment {i+1}' for i in cluster_counts.index], 
+                          cluster_counts.values, color=colors)
+            ax1.set_title('Customer Segment Distribution', fontweight='bold', fontsize=14)
+            ax1.set_xlabel('Segment')
+            ax1.set_ylabel('Number of Customers')
+            
+            # Add count labels on bars
+            for bar in bars:
+                height = bar.get_height()
+                ax1.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{int(height):,}', ha='center', va='bottom', fontweight='bold')
+            
+            # Category heatmap for top segments
+            top_categories = profiles.mean(axis=0).nlargest(min(8, profiles.shape[1]))
+            heatmap_data = profiles[top_categories.index]
+            
+            if not heatmap_data.empty:
+                # Clean category names for display
+                display_categories = [cat.replace('_', ' ').title() for cat in heatmap_data.columns]
+                heatmap_display = heatmap_data.copy()
+                heatmap_display.columns = display_categories
+                
+                sns.heatmap(heatmap_display.T, annot=True, cmap='YlOrRd', ax=ax2, 
+                           cbar_kws={'label': 'Purchase Frequency'}, fmt='.1f')
+                ax2.set_title('Shopping Patterns by Segment', fontweight='bold', fontsize=14)
+                ax2.set_xlabel('Segment')
+                ax2.set_ylabel('Product Category')
+            
+            plt.tight_layout()
+            
+            # Convert to base64 for web display
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format='png', dpi=200, bbox_inches='tight', facecolor='white')
+            buffer.seek(0)
+            img_data = base64.b64encode(buffer.read()).decode()
+            plt.close()
+            
+            # Clean up memory
+            gc.collect()
+            
+            return f'<img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;">'
+            
+        except Exception as e:
+            logging.error(f"Visualization error: {e}", exc_info=True)
+            return "<p>⚠️ Visualization unavailable</p>"
+    
+    def generate_recommendations(self, market_result: str, segment_result: str) -> Tuple[str, str]:
+        """Generate actionable business recommendations"""
+        
+        # Cross-selling recommendations
+        if "❌" not in market_result and "association rules" in market_result.lower():
+            cross_sell = """🎯 **CROSS-SELLING STRATEGY**
+
+**Immediate Actions:**
+1. **Bundle Creation**: Package frequently bought-together items at slight discount
+2. **Store Layout**: Place complementary products in adjacent locations
+3. **Recommendation Engine**: Show "customers who bought X also bought Y"
+4. **Staff Training**: Educate sales team on high-lift product combinations
+
+**Digital Marketing:**
+• Personalized email campaigns featuring complementary products
+• Website recommendations based on cart contents  
+• Social media ads showcasing popular product combinations
+• Mobile app push notifications for bundle offers
+
+**Seasonal Opportunities:**
+• Create themed bundles around holidays and events
+• Adjust cross-sell recommendations based on seasonal patterns
+• Monitor and refresh bundle offerings monthly"""
+
+        else:
+            cross_sell = """🎯 **CROSS-SELLING STRATEGY**
+
+**Data-Driven Approach Needed:**
+Since specific product associations weren't found in current data, focus on:
+
+• **Collect More Data**: Increase transaction sample size for better patterns
+• **Category-Level Analysis**: Look for broader category relationships
+• **Customer Surveys**: Ask customers about product preferences
+• **A/B Testing**: Experiment with different product placements
+• **Seasonal Analysis**: Examine patterns across different time periods"""
+
+        # Upselling recommendations  
+        if "❌" not in segment_result and "segment" in segment_result.lower():
+            upsell = """📈 **UPSELLING STRATEGY**
+
+**Segment-Specific Approaches:**
+1. **Heavy Shoppers**: Target with premium products and exclusive items
+2. **Regular Shoppers**: Offer loyalty rewards for higher-value purchases
+3. **Occasional Shoppers**: Use limited-time promotions to increase frequency
+4. **Light Shoppers**: Focus on value propositions and starter packages
+
+**Tactical Implementation:**
+• **Email Segmentation**: Personalized offers based on shopping behavior
+• **Dynamic Pricing**: Show premium options to high-value segments
+• **Loyalty Programs**: Tier-based rewards encouraging larger purchases
+• **Product Recommendations**: AI-driven suggestions for higher-margin items
+
+**Success Metrics:**
+• Average order value increase by segment
+• Customer lifetime value improvement
+• Purchase frequency changes
+• Premium product adoption rates"""
+
+        else:
+            upsell = """📈 **UPSELLING STRATEGY**
+
+**Foundation Building:**
+Current segmentation needs refinement. Recommended steps:
+
+• **Enhanced Data Collection**: Gather more customer behavior data
+• **Purchase History Analysis**: Track individual customer journeys
+• **Value-Based Segmentation**: Group customers by spending patterns
+• **Demographic Integration**: Combine with customer demographic data
+• **Behavioral Tracking**: Monitor website/app engagement patterns"""
+
+        return cross_sell, upsell
+    
+    def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
+        """Main analysis pipeline with comprehensive error handling"""
+        import pandas as pd
+        try:
+            # Validation phase
+            files = [orders_file, order_products_file, products_file, aisles_file]
+            required_columns = [
+                ['order_id', 'user_id'],
+                ['order_id', 'product_id'],
+                ['product_id', 'product_name', 'aisle_id'], 
+                ['aisle_id', 'aisle']
+            ]
+            
+            validation_error = self.validate_csv_files(files, required_columns)
+            if validation_error:
+                return validation_error, "", "", "", ""
+            
+            logging.info("File validation passed")
+            
+            # Data loading phase
+            logging.info("Loading and processing data")
+            
+            orders_df = self.load_file_smart(
+                orders_file.name, 
+                columns=['order_id', 'user_id'], 
+                sample_rate=self.sample_rates['orders']
+            )
+            
+            # Limit orders for performance
+            if len(orders_df) > self.max_orders:
+                orders_df = orders_df.sample(n=self.max_orders, random_state=42)
+                logging.info(f"Sampled to {len(orders_df):,} orders for analysis")
+            
+            # Load order products filtered by sampled orders
+            order_products_df = self.load_file_smart(
+                order_products_file.name,
+                columns=['order_id', 'product_id'],
+                sample_rate=self.sample_rates['order_products']
+            )
+            
+            # Filter to our order sample
+            order_products_df = order_products_df[
+                order_products_df['order_id'].isin(orders_df['order_id'])
+            ]
+            
+            logging.info(f"Processing {len(order_products_df):,} order items")
+            
+            # Load reference data
+            products_df = pd.read_csv(products_file.name)
+            aisles_df = pd.read_csv(aisles_file.name)
+            
+            # Clean reference data
+            products_df = self.clean_product_names(products_df, 'product_name')
+            aisles_df = self.clean_product_names(aisles_df, 'aisle')
+            
+            # Merge all data
+            logging.info("Merging datasets")
+            merged_data = (order_products_df
+                          .merge(orders_df[['order_id', 'user_id']], on='order_id', how='left')
+                          .merge(products_df, on='product_id', how='left')
+                          .merge(aisles_df, on='aisle_id', how='left')
+                          .dropna(subset=['user_id', 'product_name', 'aisle']))
+            
+            if merged_data.empty:
+                return "❌ No data remains after merging. Check file compatibility.", "", "", "", ""
+            
+            logging.info(f"Final dataset: {len(merged_data):,} records from {merged_data['user_id'].nunique():,} customers")
+            
+            # Analysis phase
+            logging.info("Running market basket analysis")
+            market_analysis = self.analyze_market_basket(merged_data)
+            
+            logging.info("Running customer segmentation")
+            segment_analysis, visualization = self.analyze_customer_segments(merged_data)
+            
+            logging.info("Generating recommendations")
+            cross_sell_recs, upsell_recs = self.generate_recommendations(market_analysis, segment_analysis)
+            
+            # Memory cleanup
+            del merged_data, order_products_df, orders_df
+            gc.collect()
+            
+            logging.info("Analysis complete")
+            return market_analysis, segment_analysis, visualization, cross_sell_recs, upsell_recs
+            
+        except Exception as e:
+            error_msg = f"❌ Analysis failed: {str(e)}\n\nPlease check your files and try again."
+            logging.error(f"Analysis failed: {str(e)}", exc_info=True)
+            return error_msg, "", "", "", ""
+
 if __name__ == "__main__":
     try:
-        print("✅ Creating optimized interface...")
+        logging.info("Creating optimized interface")
         app = create_production_interface()
-        app.mount("/health", app_fastapi)  # Mount health endpoint
+        app.mount("/health", app_fastapi)
         port = int(os.environ.get("PORT", 8080))
-        print(f"🌐 Starting server on port {port}")
-        
-        # Production-optimized launch settings
+        logging.info(f"Starting server on port {port}")
         app.launch(
             server_name="0.0.0.0",
             server_port=port,
             share=False,
             show_error=True,
-            quiet=False,  # Keep logs for monitoring
-            favicon_path=None,
-            show_tips=False,
-            enable_queue=True,
-            max_threads=8,
-            auth=None,
+            quiet=True,
+            enable_queue=False,
+            max_threads=4,
             max_file_size="300mb",
-            allowed_paths=[]
+            allowed_paths=[],
+            prevent_thread_lock=True
         )
-        
+        logging.info("Market Basket Analysis Dashboard is running")
         print("✅ Market Basket Analysis Dashboard is running!")
-        
     except Exception as e:
+        logging.error(f"Failed to start application: {str(e)}", exc_info=True)
         print(f"❌ Failed to start application: {e}")
         import traceback
         traceback.print_exc()
