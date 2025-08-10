@@ -7,6 +7,16 @@ import io
 import base64
 import gc
 from typing import Tuple, Optional
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+import gradio as gr
+import pandas as pd
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import seaborn as sns
+from mlxtend.frequent_patterns import apriori, association_rules
 
 # Configure logging and suppress warnings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -27,18 +37,7 @@ logging.info(f"Python version: {sys.version}")
 logging.info(f"Port: {os.environ.get('PORT', 8080)}")
 
 try:
-    import gradio as gr
-    import pandas as pd
-    import numpy as np
-    from sklearn.cluster import KMeans
-    from sklearn.preprocessing import StandardScaler
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from mlxtend.frequent_patterns import apriori, association_rules
-    from fastapi import FastAPI
-    
     logging.info("✅ All libraries imported successfully")
-    
 except ImportError as e:
     logging.error(f"❌ Import error: {e}", exc_info=True)
     print(f"❌ Import error: {e}")
@@ -363,10 +362,10 @@ class OptimizedMarketBasketAnalyzer:
     
     def generate_recommendations(self, market_result: str, segment_result: str) -> Tuple[str, str]:
         """Generate actionable business recommendations"""
-        
-        # Cross-selling recommendations
-        if "❌" not in market_result and "association rules" in market_result.lower():
-            cross_sell = """🎯 **CROSS-SELLING STRATEGY**
+        try:
+            # Cross-selling recommendations
+            if "❌" not in market_result and "association rules" in market_result.lower():
+                cross_sell = """🎯 **CROSS-SELLING STRATEGY**
 
 **Immediate Actions:**
 1. **Bundle Creation**: Package frequently bought-together items at slight discount
@@ -384,9 +383,8 @@ class OptimizedMarketBasketAnalyzer:
 • Create themed bundles around holidays and events
 • Adjust cross-sell recommendations based on seasonal patterns
 • Monitor and refresh bundle offerings monthly"""
-
-        else:
-            cross_sell = """🎯 **CROSS-SELLING STRATEGY**
+            else:
+                cross_sell = """🎯 **CROSS-SELLING STRATEGY**
 
 **Data-Driven Approach Needed:**
 Since specific product associations weren't found in current data, focus on:
@@ -397,9 +395,9 @@ Since specific product associations weren't found in current data, focus on:
 • **A/B Testing**: Experiment with different product placements
 • **Seasonal Analysis**: Examine patterns across different time periods"""
 
-        # Upselling recommendations  
-        if "❌" not in segment_result and "segment" in segment_result.lower():
-            upsell = """📈 **UPSELLING STRATEGY**
+            # Upselling recommendations  
+            if "❌" not in segment_result and "segment" in segment_result.lower():
+                upsell = """📈 **UPSELLING STRATEGY**
 
 **Segment-Specific Approaches:**
 1. **Heavy Shoppers**: Target with premium products and exclusive items
@@ -418,9 +416,8 @@ Since specific product associations weren't found in current data, focus on:
 • Customer lifetime value improvement
 • Purchase frequency changes
 • Premium product adoption rates"""
-
-        else:
-            upsell = """📈 **UPSELLING STRATEGY**
+            else:
+                upsell = """📈 **UPSELLING STRATEGY**
 
 **Foundation Building:**
 Current segmentation needs refinement. Recommended steps:
@@ -431,11 +428,15 @@ Current segmentation needs refinement. Recommended steps:
 • **Demographic Integration**: Combine with customer demographic data
 • **Behavioral Tracking**: Monitor website/app engagement patterns"""
 
-        return cross_sell, upsell
+            return cross_sell, upsell
+        except Exception as e:
+            logging.error(f"Recommendation generation failed: {str(e)}", exc_info=True)
+            return f"❌ Recommendation generation failed: {str(e)}", ""
     
     def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
         """Main analysis pipeline with comprehensive error handling"""
         try:
+            logging.info("Starting complete analysis")
             # Validation phase
             files = [orders_file, order_products_file, products_file, aisles_file]
             required_columns = [
@@ -447,6 +448,7 @@ Current segmentation needs refinement. Recommended steps:
             
             validation_error = self.validate_csv_files(files, required_columns)
             if validation_error:
+                logging.error(f"Validation failed: {validation_error}")
                 return validation_error, "", "", "", ""
             
             logging.info("File validation passed")
@@ -496,6 +498,7 @@ Current segmentation needs refinement. Recommended steps:
                           .dropna(subset=['user_id', 'product_name', 'aisle']))
             
             if merged_data.empty:
+                logging.error("No data remains after merging")
                 return "❌ No data remains after merging. Check file compatibility.", "", "", "", ""
             
             logging.info(f"Final dataset: {len(merged_data):,} records from {merged_data['user_id'].nunique():,} customers")
@@ -528,15 +531,15 @@ def create_production_interface():
     analyzer = OptimizedMarketBasketAnalyzer()
     
     with gr.Blocks(
-        title="Market Basket Analysis Dashboard", 
-        theme=gr.themes.Base(),  # Use lighter theme for faster startup
-        css=".gradio-container {max-width: 1200px !important}"
+        title="Market Basket Analysis Dashboard",
+        theme=gr.themes.Base(),
+        css="body {font-family: Arial, sans-serif; max-width: 1200px; margin: auto;}"
     ) as gradio_app:
         
         gr.HTML("""
-        <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; margin: -20px -20px 20px -20px;">
-            <h1 style="margin: 0; font-size: 2.5em;">🛒 Market Basket Analysis Dashboard</h1>
-            <p style="margin: 10px 0 0 0; font-size: 1.2em; opacity: 0.9;">Transform your transaction data into actionable business insights</p>
+        <div style="text-align: center; padding: 20px; background: linear-gradient(135deg, #667eea, #764ba2); color: white;">
+            <h1 style="margin: 0; font-size: 2em;">🛒 Market Basket Analysis Dashboard</h1>
+            <p style="margin: 10px 0; font-size: 1em;">Transform your transaction data into actionable business insights</p>
         </div>
         """)
         
@@ -590,7 +593,7 @@ def create_production_interface():
             elem_id="analyze_btn"
         )
         
-        gr.HTML("<hr style='margin: 30px 0;'>")
+        gr.HTML("<hr style='margin: 20px 0;'>")
         
         with gr.Tabs() as tabs:
             with gr.TabItem("📊 Market Basket Analysis"):
@@ -634,16 +637,14 @@ def create_production_interface():
         )
         
         gr.HTML("""
-        <div style="margin-top: 40px; padding: 20px; background: #f8f9fa; border-radius: 10px; text-align: center;">
-            <p style="margin: 0; color: #666;"><strong>🔧 Built with Gradio</strong> | 
-            Optimized for production deployment | 
-            <strong>📈 Ready for business insights</strong></p>
+        <div style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; text-align: center;">
+            <p style="margin: 0; color: #666;"><strong>🔧 Built with Gradio</strong> | Optimized for production deployment</p>
         </div>
         """)
     
     return gradio_app
 
-# Create FastAPI app for health check and Gradio mounting
+# Create FastAPI app
 app = FastAPI()
 
 # Health check endpoint for Cloud Run
@@ -651,16 +652,23 @@ app = FastAPI()
 async def health_check():
     return {"status": "ok"}
 
-# Mount Gradio app
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logging.error(f"Internal server error: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"message": f"Internal server error: {str(exc)}"}
+    )
+
+# Mount Gradio app using Gradio's integration
 gradio_app = create_production_interface()
-app.mount("/", gradio_app)
+app = gr.mount_gradio_app(app, gradio_app, path="/")
 
 if __name__ == "__main__":
     try:
         logging.info("✅ Creating optimized interface...")
-        # Note: uvicorn is run via Dockerfile CMD, not here
         print("✅ Market Basket Analysis Dashboard is ready!")
-        
     except Exception as e:
         logging.error(f"Failed to start application: {str(e)}", exc_info=True)
         print(f"❌ Failed to start application: {e}")
