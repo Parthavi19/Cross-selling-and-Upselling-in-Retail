@@ -77,5 +77,4 @@ USER app
 # Run the application
 CMD ["python", "-u", "app.py"]
 
-# Run the application
-CMD ["python", "-u", "app.py"]
+
