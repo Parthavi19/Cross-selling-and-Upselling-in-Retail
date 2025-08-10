@@ -659,7 +659,7 @@ if __name__ == "__main__":
     try:
         logging.info("✅ Creating optimized interface...")
         # Note: uvicorn is run via Dockerfile CMD, not here
-        print("✅ Market Basket Analysis Dashboard is running!")
+        print("✅ Market Basket Analysis Dashboard is ready!")
         
     except Exception as e:
         logging.error(f"Failed to start application: {str(e)}", exc_info=True)
