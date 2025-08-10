@@ -2,7 +2,11 @@ import os
 import sys
 import warnings
 import logging
-from contextlib import asynccontextmanager
+import tempfile
+import io
+import base64
+import gc
+from typing import Tuple, Optional
 
 # Configure logging and suppress warnings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -18,159 +22,26 @@ os.environ["GRADIO_SHARE"] = "false"
 import matplotlib
 matplotlib.use('Agg')
 
-logging.info("Starting Market Basket Analysis Dashboard")
+logging.info("🚀 Starting Market Basket Analysis Dashboard...")
 logging.info(f"Python version: {sys.version}")
 logging.info(f"Port: {os.environ.get('PORT', 8080)}")
 
 try:
-    from fastapi import FastAPI
-    import tempfile
-    import io
-    import base64
-    import gc
-    from typing import Tuple, Optional
+    import gradio as gr
+    import pandas as pd
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from mlxtend.frequent_patterns import apriori, association_rules
     
-    logging.info("Initial libraries imported successfully")
+    logging.info("✅ All libraries imported successfully")
     
 except ImportError as e:
-    logging.error(f"Import error: {e}", exc_info=True)
+    logging.error(f"❌ Import error: {e}", exc_info=True)
     print(f"❌ Import error: {e}")
     sys.exit(1)
-
-# Initialize FastAPI with lifespan event handlers
-@asynccontextmanager
-async def lifespan(app):
-    logging.info("FastAPI startup complete")
-    yield
-    logging.info("FastAPI shutdown complete")
-
-app_fastapi = FastAPI(lifespan=lifespan)
-
-@app_fastapi.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-
-def create_production_interface():
-    """Create production-ready Gradio interface"""
-    import gradio as gr
-    
-    analyzer = OptimizedMarketBasketAnalyzer()
-    
-    with gr.Blocks(
-        title="Market Basket Analysis Dashboard", 
-        theme=gr.themes.Soft(),
-        css=".gradio-container {max-width: 1200px !important}"
-    ) as app:
-        
-        gr.HTML("""
-        <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; margin: -20px -20px 20px -20px;">
-            <h1 style="margin: 0; font-size: 2.5em;">🛒 Market Basket Analysis Dashboard</h1>
-            <p style="margin: 10px 0 0 0; font-size: 1.2em; opacity: 0.9;">Transform your transaction data into actionable business insights</p>
-        </div>
-        """)
-        
-        with gr.Accordion("📋 Quick Start Guide", open=False):
-            gr.Markdown("""
-            **Upload these 4 CSV files from your retail/e-commerce platform:**
-            
-            | File | Required Columns | Description |
-            |------|------------------|-------------|
-            | **orders.csv** | `order_id`, `user_id` | Order information linking customers to purchases |
-            | **order_products.csv** | `order_id`, `product_id` | Which products were in each order |
-            | **products.csv** | `product_id`, `product_name`, `aisle_id` | Product details and categorization |
-            | **aisles.csv** | `aisle_id`, `aisle` | Product category/aisle information |
-            
-            **💡 Performance Tips:**
-            - Files up to 300MB supported with automatic optimization
-            - Large datasets are intelligently sampled for faster processing
-            - Analysis typically completes in 30-90 seconds
-            - Results include visualizations and actionable recommendations
-            """)
-        
-        with gr.Row():
-            with gr.Column(scale=1):
-                orders_file = gr.File(
-                    label="📊 Orders CSV", 
-                    file_types=[".csv"],
-                    elem_id="orders_upload"
-                )
-                products_file = gr.File(
-                    label="📦 Products CSV", 
-                    file_types=[".csv"],
-                    elem_id="products_upload"
-                )
-            
-            with gr.Column(scale=1):
-                order_products_file = gr.File(
-                    label="🛍️ Order Products CSV", 
-                    file_types=[".csv"],
-                    elem_id="order_products_upload"
-                )
-                aisles_file = gr.File(
-                    label="🏪 Aisles CSV", 
-                    file_types=[".csv"],
-                    elem_id="aisles_upload"
-                )
-        
-        analyze_button = gr.Button(
-            "🚀 Run Analysis", 
-            variant="primary", 
-            size="lg",
-            elem_id="analyze_btn"
-        )
-        
-        gr.HTML("<hr style='margin: 30px 0;'>")
-        
-        with gr.Tabs() as tabs:
-            with gr.TabItem("📊 Market Basket Analysis"):
-                market_results = gr.Markdown(
-                    value="Upload your files and click 'Run Analysis' to see market basket results...",
-                    elem_id="market_results"
-                )
-            
-            with gr.TabItem("👥 Customer Segments"):
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        segment_results = gr.Markdown(
-                            value="Customer segmentation results will appear here...",
-                            elem_id="segment_results"
-                        )
-                    with gr.Column(scale=1):
-                        segment_viz = gr.HTML(
-                            value="<div style='text-align:center; padding: 50px; color: #666;'>Visualization will appear after analysis</div>",
-                            elem_id="segment_viz"
-                        )
-            
-            with gr.TabItem("💡 Business Recommendations"):
-                with gr.Row():
-                    with gr.Column():
-                        cross_sell_recs = gr.Markdown(
-                            value="Cross-selling recommendations will be generated based on your analysis...",
-                            elem_id="cross_sell"
-                        )
-                    with gr.Column():
-                        upsell_recs = gr.Markdown(
-                            value="Upselling strategies will be provided after analysis...",
-                            elem_id="upsell"
-                        )
-        
-        # Event handler
-        analyze_button.click(
-            fn=analyzer.run_complete_analysis,
-            inputs=[orders_file, order_products_file, products_file, aisles_file],
-            outputs=[market_results, segment_results, segment_viz, cross_sell_recs, upsell_recs],
-            show_progress=True
-        )
-        
-        gr.HTML("""
-        <div style="margin-top: 40px; padding: 20px; background: #f8f9fa; border-radius: 10px; text-align: center;">
-            <p style="margin: 0; color: #666;"><strong>🔧 Built with Gradio</strong> | 
-            Optimized for production deployment | 
-            <strong>📈 Ready for business insights</strong></p>
-        </div>
-        """)
-    
-    return app
 
 class OptimizedMarketBasketAnalyzer:
     """Optimized analyzer for production deployment with large file handling"""
@@ -193,7 +64,6 @@ class OptimizedMarketBasketAnalyzer:
     
     def clean_product_names(self, df, column: str):
         """Clean product/aisle names efficiently"""
-        import pandas as pd
         if column in df.columns:
             df[column] = (df[column]
                          .astype(str)
@@ -205,7 +75,6 @@ class OptimizedMarketBasketAnalyzer:
     
     def validate_csv_files(self, files: list, required_columns: list) -> Optional[str]:
         """Validate uploaded CSV files structure and size"""
-        import pandas as pd
         file_names = ["orders.csv", "order_products.csv", "products.csv", "aisles.csv"]
         
         for i, (file, cols, name) in enumerate(zip(files, required_columns, file_names)):
@@ -235,7 +104,6 @@ class OptimizedMarketBasketAnalyzer:
     
     def load_file_smart(self, file_path: str, columns: list = None, sample_rate: float = 1.0):
         """Smart file loading with automatic sampling for large files"""
-        import pandas as pd
         file_size = self.get_file_size_mb(file_path)
         
         try:
@@ -273,8 +141,6 @@ class OptimizedMarketBasketAnalyzer:
     
     def analyze_market_basket(self, data) -> str:
         """Perform market basket analysis with error handling"""
-        import pandas as pd
-        from mlxtend.frequent_patterns import apriori, association_rules
         try:
             logging.info("Analyzing market basket patterns")
             
@@ -343,12 +209,6 @@ class OptimizedMarketBasketAnalyzer:
     
     def analyze_customer_segments(self, data) -> Tuple[str, str]:
         """Perform customer segmentation analysis"""
-        import pandas as pd
-        import numpy as np
-        from sklearn.cluster import KMeans
-        from sklearn.preprocessing import StandardScaler
-        import matplotlib.pyplot as plt
-        import seaborn as sns
         try:
             logging.info("Analyzing customer segments")
             
@@ -447,9 +307,6 @@ class OptimizedMarketBasketAnalyzer:
     
     def _create_segment_visualization(self, clusters, profiles) -> str:
         """Create customer segment visualization"""
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        import pandas as pd
         try:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
             
@@ -577,7 +434,6 @@ Current segmentation needs refinement. Recommended steps:
     
     def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
         """Main analysis pipeline with comprehensive error handling"""
-        import pandas as pd
         try:
             # Validation phase
             files = [orders_file, order_products_file, products_file, aisles_file]
@@ -665,13 +521,135 @@ Current segmentation needs refinement. Recommended steps:
             logging.error(f"Analysis failed: {str(e)}", exc_info=True)
             return error_msg, "", "", "", ""
 
+def create_production_interface():
+    """Create production-ready Gradio interface"""
+    
+    analyzer = OptimizedMarketBasketAnalyzer()
+    
+    with gr.Blocks(
+        title="Market Basket Analysis Dashboard", 
+        theme=gr.themes.Soft(),
+        css=".gradio-container {max-width: 1200px !important}"
+    ) as app:
+        
+        gr.HTML("""
+        <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; margin: -20px -20px 20px -20px;">
+            <h1 style="margin: 0; font-size: 2.5em;">🛒 Market Basket Analysis Dashboard</h1>
+            <p style="margin: 10px 0 0 0; font-size: 1.2em; opacity: 0.9;">Transform your transaction data into actionable business insights</p>
+        </div>
+        """)
+        
+        with gr.Accordion("📋 Quick Start Guide", open=False):
+            gr.Markdown("""
+            **Upload these 4 CSV files from your retail/e-commerce platform:**
+            
+            | File | Required Columns | Description |
+            |------|------------------|-------------|
+            | **orders.csv** | `order_id`, `user_id` | Order information linking customers to purchases |
+            | **order_products.csv** | `order_id`, `product_id` | Which products were in each order |
+            | **products.csv** | `product_id`, `product_name`, `aisle_id` | Product details and categorization |
+            | **aisles.csv** | `aisle_id`, `aisle` | Product category/aisle information |
+            
+            **💡 Performance Tips:**
+            - Files up to 300MB supported with automatic optimization
+            - Large datasets are intelligently sampled for faster processing
+            - Analysis typically completes in 30-90 seconds
+            - Results include visualizations and actionable recommendations
+            """)
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                orders_file = gr.File(
+                    label="📊 Orders CSV", 
+                    file_types=[".csv"],
+                    elem_id="orders_upload"
+                )
+                products_file = gr.File(
+                    label="📦 Products CSV", 
+                    file_types=[".csv"],
+                    elem_id="products_upload"
+                )
+            
+            with gr.Column(scale=1):
+                order_products_file = gr.File(
+                    label="🛍️ Order Products CSV", 
+                    file_types=[".csv"],
+                    elem_id="order_products_upload"
+                )
+                aisles_file = gr.File(
+                    label="🏪 Aisles CSV", 
+                    file_types=[".csv"],
+                    elem_id="aisles_upload"
+                )
+        
+        analyze_button = gr.Button(
+            "🚀 Run Analysis", 
+            variant="primary", 
+            size="lg",
+            elem_id="analyze_btn"
+        )
+        
+        gr.HTML("<hr style='margin: 30px 0;'>")
+        
+        with gr.Tabs() as tabs:
+            with gr.TabItem("📊 Market Basket Analysis"):
+                market_results = gr.Markdown(
+                    value="Upload your files and click 'Run Analysis' to see market basket results...",
+                    elem_id="market_results"
+                )
+            
+            with gr.TabItem("👥 Customer Segments"):
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        segment_results = gr.Markdown(
+                            value="Customer segmentation results will appear here...",
+                            elem_id="segment_results"
+                        )
+                    with gr.Column(scale=1):
+                        segment_viz = gr.HTML(
+                            value="<div style='text-align:center; padding: 50px; color: #666;'>Visualization will appear after analysis</div>",
+                            elem_id="segment_viz"
+                        )
+            
+            with gr.TabItem("💡 Business Recommendations"):
+                with gr.Row():
+                    with gr.Column():
+                        cross_sell_recs = gr.Markdown(
+                            value="Cross-selling recommendations will be generated based on your analysis...",
+                            elem_id="cross_sell"
+                        )
+                    with gr.Column():
+                        upsell_recs = gr.Markdown(
+                            value="Upselling strategies will be provided after analysis...",
+                            elem_id="upsell"
+                        )
+        
+        # Event handler
+        analyze_button.click(
+            fn=analyzer.run_complete_analysis,
+            inputs=[orders_file, order_products_file, products_file, aisles_file],
+            outputs=[market_results, segment_results, segment_viz, cross_sell_recs, upsell_recs],
+            show_progress=True
+        )
+        
+        gr.HTML("""
+        <div style="margin-top: 40px; padding: 20px; background: #f8f9fa; border-radius: 10px; text-align: center;">
+            <p style="margin: 0; color: #666;"><strong>🔧 Built with Gradio</strong> | 
+            Optimized for production deployment | 
+            <strong>📈 Ready for business insights</strong></p>
+        </div>
+        """)
+    
+    return app
+
 if __name__ == "__main__":
     try:
-        logging.info("Creating optimized interface")
+        logging.info("✅ Creating optimized interface...")
         app = create_production_interface()
         
         port = int(os.environ.get("PORT", 8080))
         logging.info(f"Starting server on port {port}")
+        
         app.launch(
             server_name="0.0.0.0",
             server_port=port,
@@ -686,6 +664,7 @@ if __name__ == "__main__":
         )
         logging.info("Market Basket Analysis Dashboard is running")
         print("✅ Market Basket Analysis Dashboard is running!")
+        
     except Exception as e:
         logging.error(f"Failed to start application: {str(e)}", exc_info=True)
         print(f"❌ Failed to start application: {e}")
