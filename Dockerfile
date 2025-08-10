@@ -1,47 +1,67 @@
-# Use Python 3.11 slim image for better performance
+# Use Python 3.11 slim for better memory efficiency
 FROM python:3.11-slim
+
+# Set environment variables for optimization
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONIOENCODING=utf-8
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# Optimize Python for production
+ENV PYTHONHASHSEED=0
+ENV PYTHONOPTIMIZE=2
+
+# Set memory and CPU optimizations
+ENV OMP_NUM_THREADS=2
+ENV MKL_NUM_THREADS=2
+ENV OPENBLAS_NUM_THREADS=2
+ENV VECLIB_MAXIMUM_THREADS=2
+ENV NUMEXPR_NUM_THREADS=2
+
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
 
 # Set working directory
 WORKDIR /app
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PORT=8080
-ENV GRADIO_SERVER_NAME=0.0.0.0
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
-    libpng-dev \
-    libfreetype6-dev \
-    libjpeg-dev \
-    zlib1g-dev \
+    libc6-dev \
+    libffi-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies with optimizations
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip cache purge
 
-# Copy application code
+# Copy application files
 COPY app.py .
 
-# Create non-root user for security
-RUN useradd --create-home --shell /bin/bash appuser && \
-    chown -R appuser:appuser /app
+# Set proper ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
 USER appuser
+
+# Create temp directory for user
+RUN mkdir -p /tmp/gradio_tmp && chmod 755 /tmp/gradio_tmp
+ENV GRADIO_TEMP_DIR=/tmp/gradio_tmp
 
 # Expose port
 EXPOSE 8080
 
-# Health check targeting the custom endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Run the application with uvicorn
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+# Command to run the application
+CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--timeout-keep-alive", "300", "--access-log"]
