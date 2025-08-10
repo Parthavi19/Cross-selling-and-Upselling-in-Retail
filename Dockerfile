@@ -2,28 +2,30 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies for scientific computing
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
+# Copy requirements first for better caching
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy the application
 COPY app.py .
 
-# Create temp directory for file uploads
-RUN mkdir -p /tmp
+# Create directories for temporary files
+RUN mkdir -p /tmp && chmod 777 /tmp
 
 # Set environment variables
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 
-# Expose the port
+# Expose port
 EXPOSE 8080
 
-# Run the Gradio app directly (not with uvicorn)
+# FIXED: Run Python directly, not uvicorn
 CMD ["python", "app.py"]
