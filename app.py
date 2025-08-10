@@ -23,24 +23,25 @@ print(f"Port: {os.environ.get('PORT', 8080)}")
 
 try:
     import gradio as gr
-    import pandas as pd
-    import numpy as np
-    from mlxtend.frequent_patterns import apriori, association_rules
-    from sklearn.cluster import KMeans
-    from sklearn.preprocessing import StandardScaler
-    import matplotlib.pyplot as plt
-    import seaborn as sns
     import tempfile
     import io
     import base64
     import gc
     from typing import Tuple, Optional
+    from fastapi import FastAPI
     
     print("✅ All libraries imported successfully")
     
 except ImportError as e:
     print(f"❌ Import error: {e}")
     sys.exit(1)
+
+# Initialize FastAPI for health check
+app_fastapi = FastAPI()
+
+@app_fastapi.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
 class OptimizedMarketBasketAnalyzer:
     """Optimized analyzer for production deployment with large file handling"""
@@ -61,8 +62,9 @@ class OptimizedMarketBasketAnalyzer:
         except:
             return 0
     
-    def clean_product_names(self, df: pd.DataFrame, column: str) -> pd.DataFrame:
+    def clean_product_names(self, df, column: str):
         """Clean product/aisle names efficiently"""
+        import pandas as pd
         if column in df.columns:
             df[column] = (df[column]
                          .astype(str)
@@ -74,6 +76,7 @@ class OptimizedMarketBasketAnalyzer:
     
     def validate_csv_files(self, files: list, required_columns: list) -> Optional[str]:
         """Validate uploaded CSV files structure and size"""
+        import pandas as pd
         file_names = ["orders.csv", "order_products.csv", "products.csv", "aisles.csv"]
         
         for i, (file, cols, name) in enumerate(zip(files, required_columns, file_names)):
@@ -101,8 +104,9 @@ class OptimizedMarketBasketAnalyzer:
         
         return None
     
-    def load_file_smart(self, file_path: str, columns: list = None, sample_rate: float = 1.0) -> pd.DataFrame:
+    def load_file_smart(self, file_path: str, columns: list = None, sample_rate: float = 1.0):
         """Smart file loading with automatic sampling for large files"""
+        import pandas as pd
         file_size = self.get_file_size_mb(file_path)
         
         try:
@@ -138,8 +142,10 @@ class OptimizedMarketBasketAnalyzer:
             # Fallback: load limited rows
             return pd.read_csv(file_path, usecols=columns, nrows=10000)
     
-    def analyze_market_basket(self, data: pd.DataFrame) -> str:
+    def analyze_market_basket(self, data) -> str:
         """Perform market basket analysis with error handling"""
+        import pandas as pd
+        from mlxtend.frequent_patterns import apriori, association_rules
         try:
             print("🛒 Analyzing market basket patterns...")
             
@@ -205,8 +211,14 @@ class OptimizedMarketBasketAnalyzer:
         except Exception as e:
             return f"❌ Market basket analysis failed: {str(e)}\nTry with a smaller dataset or different file format."
     
-    def analyze_customer_segments(self, data: pd.DataFrame) -> Tuple[str, str]:
+    def analyze_customer_segments(self, data) -> Tuple[str, str]:
         """Perform customer segmentation analysis"""
+        import pandas as pd
+        import numpy as np
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import StandardScaler
+        import matplotlib.pyplot as plt
+        import seaborn as sns
         try:
             print("👥 Analyzing customer segments...")
             
@@ -291,7 +303,7 @@ class OptimizedMarketBasketAnalyzer:
         except Exception as e:
             return f"❌ Customer segmentation failed: {str(e)}", ""
     
-    def _get_behavior_insights(self, intensity: float, categories: pd.Series) -> str:
+    def _get_behavior_insights(self, intensity: float, categories) -> str:
         """Generate behavioral insights for customer segments"""
         if intensity > 8:
             return f"High-frequency shoppers, strong preference for {categories.index[0].replace('_', ' ')}"
@@ -302,8 +314,11 @@ class OptimizedMarketBasketAnalyzer:
         else:
             return "Infrequent shoppers, potential for engagement campaigns"
     
-    def _create_segment_visualization(self, clusters: np.ndarray, profiles: pd.DataFrame) -> str:
+    def _create_segment_visualization(self, clusters, profiles) -> str:
         """Create customer segment visualization"""
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import pandas as pd
         try:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
             
@@ -431,7 +446,7 @@ Current segmentation needs refinement. Recommended steps:
     
     def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
         """Main analysis pipeline with comprehensive error handling"""
-        
+        import pandas as pd
         try:
             # Validation phase
             files = [orders_file, order_products_file, products_file, aisles_file]
@@ -646,7 +661,7 @@ if __name__ == "__main__":
     try:
         print("✅ Creating optimized interface...")
         app = create_production_interface()
-        
+        app.mount("/health", app_fastapi)  # Mount health endpoint
         port = int(os.environ.get("PORT", 8080))
         print(f"🌐 Starting server on port {port}")
         
