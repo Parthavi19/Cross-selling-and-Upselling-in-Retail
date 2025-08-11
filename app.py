@@ -8,8 +8,6 @@ import base64
 import gc
 import psutil
 from typing import Tuple, Optional, Union
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 import gradio as gr
 import pandas as pd
 import numpy as np
@@ -18,7 +16,6 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mlxtend.frequent_patterns import apriori, association_rules
-import uvicorn
 
 # Configure logging and suppress warnings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -369,7 +366,6 @@ class OptimizedMarketBasketAnalyzer:
                     frequent_itemsets, 
                     metric="confidence", 
                     min_threshold=0.1,
-                    num_itemsets=len(frequent_itemsets)
                 )
             except Exception as e:
                 logging.error(f"Rules generation failed: {e}")
@@ -1049,7 +1045,7 @@ def create_production_interface():
         gr.HTML("""
         <div style="margin-top: 25px; padding: 15px; background: linear-gradient(135deg, #f8f9fa, #e9ecef); border-radius: 12px; text-align: center;">
             <div style="display: flex; justify-content: space-around; align-items: center; flex-wrap: wrap; gap: 15px;">
-                <div><strong>🔧 Built with</strong><br><span style="color: #6c757d;">Gradio + FastAPI</span></div>
+                <div><strong>🔧 Built with</strong><br><span style="color: #6c757d;">Gradio</span></div>
                 <div><strong>⚡ Optimized for</strong><br><span style="color: #6c757d;">300MB+ datasets</span></div>
                 <div><strong>🧠 Powered by</strong><br><span style="color: #6c757d;">scikit-learn + MLxtend</span></div>
                 <div><strong>📊 Advanced</strong><br><span style="color: #6c757d;">MiniBatch clustering</span></div>
@@ -1059,54 +1055,7 @@ def create_production_interface():
     
     return gradio_app
 
-# Create FastAPI app
-app = FastAPI(
-    title="Market Basket Analysis Dashboard",
-    description="Optimized for large datasets",
-    version="1.0.0"
-)
-
-# Health check endpoint for Cloud Run
-@app.get("/health")
-async def health_check():
-    try:
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / (1024 * 1024)
-        return {
-            "status": "healthy",
-            "memory_usage_mb": round(memory_mb, 2),
-            "message": "Market Basket Analysis Dashboard is running"
-        }
-    except Exception as e:
-        return {"status": "error", "message": f"Health check failed: {str(e)}"}
-
-# Memory status endpoint
-@app.get("/status")
-async def status_check():
-    try:
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        return {
-            "memory_usage_mb": round(memory_info.rss / (1024 * 1024), 2),
-            "memory_percent": process.memory_percent(),
-            "cpu_percent": process.cpu_percent(),
-            "status": "operational"
-        }
-    except Exception as e:
-        return {"status": "error", "message": f"Status check failed: {str(e)}"}
-
-# Global exception handler
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    logging.error(f"Internal server error: {str(exc)}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"message": f"Internal server error: {str(exc)[:200]}"}
-    )
-
-# Mount Gradio app
 gradio_app = create_production_interface()
-app = gr.mount_gradio_app(app, gradio_app, path="/")
 
 if __name__ == "__main__":
     try:
@@ -1116,8 +1065,12 @@ if __name__ == "__main__":
         print(f"💾 Advanced memory management enabled")
         print(f"⚡ Starting on port {PORT}")
         
-        # Start the server
-        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+        gradio_app.launch(
+            server_name="0.0.0.0",
+            server_port=PORT,
+            show_error=True,
+            debug=False  # Set to True for local debugging if needed
+        )
         
     except Exception as e:
         logging.error(f"Failed to start application: {str(e)}", exc_info=True)
