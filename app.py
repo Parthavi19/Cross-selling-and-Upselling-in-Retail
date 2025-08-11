@@ -7,7 +7,7 @@ import io
 import base64
 import gc
 import psutil
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import gradio as gr
@@ -71,7 +71,12 @@ class OptimizedMarketBasketAnalyzer:
     def get_file_size_mb(self, file_path: str) -> float:
         """Get file size in MB"""
         try:
-            return os.path.getsize(file_path) / (1024 * 1024)
+            if hasattr(file_path, 'name'):
+                return os.path.getsize(file_path.name) / (1024 * 1024)
+            elif isinstance(file_path, str):
+                return os.path.getsize(file_path) / (1024 * 1024)
+            else:
+                return 0
         except:
             return 0
     
@@ -98,35 +103,61 @@ class OptimizedMarketBasketAnalyzer:
             if file is None:
                 return f"❌ Please upload {name}"
             
-            # Check file size - increased limit
-            file_size = self.get_file_size_mb(file.name)
-            if file_size > 1200:  # Increased to 1.2GB
-                return f"❌ {name} too large ({file_size:.1f}MB). Max 1200MB per file."
-            
             try:
-                # Quick structure validation with error handling
-                test_df = pd.read_csv(file.name, nrows=10, encoding='utf-8', 
-                                    on_bad_lines='skip', low_memory=False)
-                missing_cols = [col for col in cols if col not in test_df.columns]
-                if missing_cols:
-                    return f"❌ {name} missing columns: {', '.join(missing_cols)}"
-                    
-                # Check for empty files
-                if len(test_df) == 0:
+                # Get file path properly
+                file_path = file.name if hasattr(file, 'name') else str(file)
+                
+                # Check if file exists
+                if not os.path.exists(file_path):
+                    return f"❌ {name} file not found or corrupted"
+                
+                # Check file size - increased limit
+                file_size = self.get_file_size_mb(file_path)
+                if file_size == 0:
                     return f"❌ {name} appears to be empty"
                     
+                if file_size > 1200:  # Increased to 1.2GB
+                    return f"❌ {name} too large ({file_size:.1f}MB). Max 1200MB per file."
+                
+                # Quick structure validation with better error handling
+                try:
+                    test_df = pd.read_csv(file_path, nrows=5, encoding='utf-8', 
+                                        on_bad_lines='skip', low_memory=False)
+                    
+                    if len(test_df) == 0:
+                        return f"❌ {name} contains no readable data"
+                    
+                    missing_cols = [col for col in cols if col not in test_df.columns]
+                    if missing_cols:
+                        available_cols = list(test_df.columns)
+                        return f"❌ {name} missing columns: {', '.join(missing_cols)}. Available: {', '.join(available_cols)}"
+                        
+                except pd.errors.EmptyDataError:
+                    return f"❌ {name} is empty or corrupted"
+                except pd.errors.ParserError as e:
+                    return f"❌ {name} format error: {str(e)[:100]}"
+                except UnicodeDecodeError:
+                    return f"❌ {name} encoding error. Try UTF-8 encoding"
+                    
             except Exception as e:
-                return f"❌ Error reading {name}: {str(e)[:100]}"
+                return f"❌ Error validating {name}: {str(e)[:100]}"
         
         return None
     
-    def load_file_optimized(self, file_path: str, columns: list = None, 
+    def load_file_optimized(self, file_path: Union[str, object], columns: list = None, 
                            sample_rate: float = 1.0, max_rows: int = None):
         """Ultra-optimized file loading for very large files"""
-        file_size = self.get_file_size_mb(file_path)
+        
+        # Handle file path extraction
+        if hasattr(file_path, 'name'):
+            actual_path = file_path.name
+        else:
+            actual_path = str(file_path)
+        
+        file_size = self.get_file_size_mb(actual_path)
         
         try:
-            logging.info(f"Loading {file_path} ({file_size:.1f}MB), Memory: {self.get_memory_usage():.1f}MB")
+            logging.info(f"Loading {actual_path} ({file_size:.1f}MB), Memory: {self.get_memory_usage():.1f}MB")
             
             # Determine optimal strategy based on file size
             if file_size > 200:  # Very large files
@@ -139,58 +170,63 @@ class OptimizedMarketBasketAnalyzer:
                 # Use smaller chunk size for very large files
                 chunk_size = min(self.chunk_size, 5000)
                 
-                chunk_reader = pd.read_csv(
-                    file_path, 
-                    chunksize=chunk_size,
-                    usecols=columns,
-                    encoding='utf-8',
-                    on_bad_lines='skip',
-                    low_memory=False,
-                    dtype=str  # Read all as string first to avoid type issues
-                )
-                
-                for i, chunk in enumerate(chunk_reader):
-                    if total_rows >= rows_to_process:
-                        break
+                try:
+                    chunk_reader = pd.read_csv(
+                        actual_path, 
+                        chunksize=chunk_size,
+                        usecols=columns,
+                        encoding='utf-8',
+                        on_bad_lines='skip',
+                        low_memory=False,
+                        dtype=str  # Read all as string first to avoid type issues
+                    )
+                    
+                    for i, chunk in enumerate(chunk_reader):
+                        if total_rows >= rows_to_process:
+                            break
+                            
+                        # Convert numeric columns if needed
+                        numeric_columns = ['order_id', 'user_id', 'product_id', 'aisle_id']
+                        for col in numeric_columns:
+                            if col in chunk.columns:
+                                chunk[col] = pd.to_numeric(chunk[col], errors='coerce')
                         
-                    # Convert numeric columns if needed
-                    if 'order_id' in chunk.columns:
-                        chunk['order_id'] = pd.to_numeric(chunk['order_id'], errors='coerce')
-                    if 'user_id' in chunk.columns:
-                        chunk['user_id'] = pd.to_numeric(chunk['user_id'], errors='coerce')
-                    if 'product_id' in chunk.columns:
-                        chunk['product_id'] = pd.to_numeric(chunk['product_id'], errors='coerce')
-                    if 'aisle_id' in chunk.columns:
-                        chunk['aisle_id'] = pd.to_numeric(chunk['aisle_id'], errors='coerce')
+                        # Drop rows with NaN in critical columns
+                        critical_cols = [col for col in chunk.columns if col in ['order_id', 'user_id', 'product_id']]
+                        if critical_cols:
+                            chunk = chunk.dropna(subset=critical_cols)
+                        
+                        if sample_rate < 1.0 and len(chunk) > 0:
+                            sample_size = max(1, int(len(chunk) * sample_rate))
+                            chunk = chunk.sample(n=sample_size, random_state=42)
+                        
+                        if len(chunk) > 0:
+                            chunks.append(chunk)
+                            total_rows += len(chunk)
+                        
+                        if i % 10 == 0:
+                            logging.info(f"Processed {i+1} chunks, {total_rows:,} rows, Memory: {self.get_memory_usage():.1f}MB")
+                            self.clean_memory()
                     
-                    # Drop rows with NaN in critical columns
-                    chunk = chunk.dropna(subset=[col for col in chunk.columns if col in ['order_id', 'user_id', 'product_id']])
+                    if not chunks:
+                        logging.error("No valid data loaded from chunks")
+                        return pd.DataFrame(columns=columns or [])
                     
-                    if sample_rate < 1.0 and len(chunk) > 0:
-                        chunk = chunk.sample(frac=sample_rate, random_state=42)
+                    result = pd.concat(chunks, ignore_index=True)
+                    self.clean_memory()
                     
-                    if len(chunk) > 0:
-                        chunks.append(chunk)
-                        total_rows += len(chunk)
-                    
-                    if i % 10 == 0:
-                        logging.info(f"Processed {i+1} chunks, {total_rows:,} rows, Memory: {self.get_memory_usage():.1f}MB")
-                        self.clean_memory()
+                    logging.info(f"Loaded {len(result):,} rows from {len(chunks)} chunks, Memory: {self.get_memory_usage():.1f}MB")
+                    return result
                 
-                if not chunks:
-                    logging.error("No valid data loaded from chunks")
-                    return pd.DataFrame(columns=columns or [])
-                
-                result = pd.concat(chunks, ignore_index=True)
-                self.clean_memory()
-                
-                logging.info(f"Loaded {len(result):,} rows from {len(chunks)} chunks, Memory: {self.get_memory_usage():.1f}MB")
-                return result
+                except Exception as chunk_error:
+                    logging.error(f"Chunked reading failed: {chunk_error}")
+                    # Fallback to regular reading with smaller nrows
+                    return self._fallback_load(actual_path, columns, 10000)
                 
             else:
                 # Normal loading for smaller files
                 df = pd.read_csv(
-                    file_path, 
+                    actual_path, 
                     usecols=columns,
                     encoding='utf-8',
                     on_bad_lines='skip',
@@ -200,7 +236,8 @@ class OptimizedMarketBasketAnalyzer:
                 logging.info(f"Loaded {len(df):,} rows, Memory: {self.get_memory_usage():.1f}MB")
                 
                 if sample_rate < 1.0 and len(df) > 0:
-                    df = df.sample(frac=sample_rate, random_state=42)
+                    sample_size = max(1, int(len(df) * sample_rate))
+                    df = df.sample(n=sample_size, random_state=42)
                     logging.info(f"Sampled to {len(df):,} rows, Memory: {self.get_memory_usage():.1f}MB")
                 
                 if max_rows and len(df) > max_rows:
@@ -210,12 +247,18 @@ class OptimizedMarketBasketAnalyzer:
                 return df
                 
         except Exception as e:
-            logging.error(f"Error loading file {file_path}: {str(e)}")
-            # Emergency fallback
-            try:
-                return pd.read_csv(file_path, usecols=columns, nrows=10000, encoding='utf-8', on_bad_lines='skip')
-            except:
-                return pd.DataFrame(columns=columns or [])
+            logging.error(f"Error loading file {actual_path}: {str(e)}")
+            return self._fallback_load(actual_path, columns, 5000)
+    
+    def _fallback_load(self, file_path: str, columns: list, nrows: int):
+        """Emergency fallback loading with minimal rows"""
+        try:
+            logging.info(f"Using fallback loading with {nrows} rows")
+            return pd.read_csv(file_path, usecols=columns, nrows=nrows, 
+                             encoding='utf-8', on_bad_lines='skip')
+        except:
+            logging.error("Fallback loading failed, returning empty DataFrame")
+            return pd.DataFrame(columns=columns or [])
     
     def analyze_market_basket(self, data) -> str:
         """Optimized market basket analysis for large datasets"""
@@ -740,11 +783,11 @@ Current segmentation needs enhancement. Priority actions:
             logging.info("📂 Loading datasets with optimization...")
             
             # Load orders with aggressive sampling for very large files
-            orders_file_size = self.get_file_size_mb(orders_file.name)
+            orders_file_size = self.get_file_size_mb(orders_file)
             orders_sample_rate = self.sample_rates['orders'] if orders_file_size > 200 else 0.2
             
             orders_df = self.load_file_optimized(
-                orders_file.name, 
+                orders_file, 
                 columns=['order_id', 'user_id'], 
                 sample_rate=orders_sample_rate,
                 max_rows=self.max_orders
@@ -756,10 +799,10 @@ Current segmentation needs enhancement. Priority actions:
             logging.info(f"📊 Loaded {len(orders_df):,} orders from {orders_df['user_id'].nunique():,} customers")
             
             # Load order products filtered by available orders
-            order_products_sample_rate = self.sample_rates['order_products'] if self.get_file_size_mb(order_products_file.name) > 200 else 0.3
+            order_products_sample_rate = self.sample_rates['order_products'] if self.get_file_size_mb(order_products_file) > 200 else 0.3
             
             order_products_df = self.load_file_optimized(
-                order_products_file.name,
+                order_products_file,
                 columns=['order_id', 'product_id'],
                 sample_rate=order_products_sample_rate
             )
@@ -771,12 +814,12 @@ Current segmentation needs enhancement. Priority actions:
             
             # Load reference data (these are typically smaller)
             products_df = self.load_file_optimized(
-                products_file.name,
+                products_file,
                 columns=['product_id', 'product_name', 'aisle_id']
             )
             
             aisles_df = self.load_file_optimized(
-                aisles_file.name,
+                aisles_file,
                 columns=['aisle_id', 'aisle']
             )
             
@@ -897,7 +940,7 @@ def create_production_interface():
         </div>
         """)
         
-        with gr.Accordion("📋 Ultra-Large Dataset Guide", open=True):
+        with gr.Accordion("📋 Ultra-Large Dataset Guide", open=False):
             gr.Markdown("""
             **🎯 Optimized for Enterprise-Scale Data:**
             
@@ -932,14 +975,12 @@ def create_production_interface():
                 orders_file = gr.File(
                     label="Orders CSV (order_id, user_id)", 
                     file_types=[".csv"],
-                    elem_id="orders_upload",
-                    elem_classes=["upload-container"]
+                    elem_id="orders_upload"
                 )
                 products_file = gr.File(
                     label="Products CSV (product_id, product_name, aisle_id)", 
                     file_types=[".csv"],
-                    elem_id="products_upload",
-                    elem_classes=["upload-container"]
+                    elem_id="products_upload"
                 )
             
             with gr.Column(scale=1):
@@ -947,14 +988,12 @@ def create_production_interface():
                 order_products_file = gr.File(
                     label="Order Products CSV (order_id, product_id)", 
                     file_types=[".csv"],
-                    elem_id="order_products_upload",
-                    elem_classes=["upload-container"]
+                    elem_id="order_products_upload"
                 )
                 aisles_file = gr.File(
                     label="Aisles CSV (aisle_id, aisle)", 
                     file_types=[".csv"],
-                    elem_id="aisles_upload",
-                    elem_classes=["upload-container"]
+                    elem_id="aisles_upload"
                 )
         
         with gr.Row():
