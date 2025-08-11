@@ -59,11 +59,5 @@ ENV GRADIO_TEMP_DIR=/tmp/gradio_tmp
 # Expose port
 EXPOSE 8080
 
-# Health check (removed since Gradio doesn't support /health endpoint natively)
-# Instead, rely on Gradio's built-in readiness
-# HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
-#     CMD curl -f http://localhost:8080/health || exit 1
-
 # Command to run the application
-# Removed uvicorn since we're using Gradio directly
 CMD ["python", "app.py"]
