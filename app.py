@@ -95,54 +95,76 @@ class OptimizedMarketBasketAnalyzer:
                          .fillna('unknown'))
         return df
     
+    def validate_single_file(self, file, required_cols: list, file_name: str) -> Optional[str]:
+        """Validate a single uploaded CSV file"""
+        if file is None:
+            return None  # Don't validate if no file uploaded
+        
+        try:
+            # Get file path properly
+            file_path = file.name if hasattr(file, 'name') else str(file)
+            
+            # Check if file exists
+            if not os.path.exists(file_path):
+                return f"❌ {file_name} file not found or corrupted"
+            
+            # Check file size
+            file_size = self.get_file_size_mb(file_path)
+            if file_size == 0:
+                return f"❌ {file_name} appears to be empty"
+                
+            if file_size > 1200:  # 1.2GB limit
+                return f"❌ {file_name} too large ({file_size:.1f}MB). Max 1200MB per file."
+            
+            # Quick structure validation
+            try:
+                test_df = pd.read_csv(file_path, nrows=3, encoding='utf-8', 
+                                    on_bad_lines='skip', low_memory=False)
+                
+                if len(test_df) == 0:
+                    return f"❌ {file_name} contains no readable data"
+                
+                missing_cols = [col for col in required_cols if col not in test_df.columns]
+                if missing_cols:
+                    available_cols = list(test_df.columns)
+                    return f"❌ {file_name} missing columns: {', '.join(missing_cols)}. Available: {', '.join(available_cols)}"
+                
+                return f"✅ {file_name} validated successfully ({file_size:.1f}MB)"
+                    
+            except pd.errors.EmptyDataError:
+                return f"❌ {file_name} is empty or corrupted"
+            except pd.errors.ParserError as e:
+                return f"❌ {file_name} format error: {str(e)[:100]}"
+            except UnicodeDecodeError:
+                return f"❌ {file_name} encoding error. Try UTF-8 encoding"
+                
+        except Exception as e:
+            return f"❌ Error validating {file_name}: {str(e)[:100]}"
+    
     def validate_csv_files(self, files: list, required_columns: list) -> Optional[str]:
         """Validate uploaded CSV files structure and size"""
         file_names = ["orders.csv", "order_products.csv", "products.csv", "aisles.csv"]
         
-        for i, (file, cols, name) in enumerate(zip(files, required_columns, file_names)):
-            if file is None:
-                return f"❌ Please upload {name}"
-            
-            try:
-                # Get file path properly
-                file_path = file.name if hasattr(file, 'name') else str(file)
-                
-                # Check if file exists
-                if not os.path.exists(file_path):
-                    return f"❌ {name} file not found or corrupted"
-                
-                # Check file size - increased limit
-                file_size = self.get_file_size_mb(file_path)
-                if file_size == 0:
-                    return f"❌ {name} appears to be empty"
-                    
-                if file_size > 1200:  # Increased to 1.2GB
-                    return f"❌ {name} too large ({file_size:.1f}MB). Max 1200MB per file."
-                
-                # Quick structure validation with better error handling
-                try:
-                    test_df = pd.read_csv(file_path, nrows=5, encoding='utf-8', 
-                                        on_bad_lines='skip', low_memory=False)
-                    
-                    if len(test_df) == 0:
-                        return f"❌ {name} contains no readable data"
-                    
-                    missing_cols = [col for col in cols if col not in test_df.columns]
-                    if missing_cols:
-                        available_cols = list(test_df.columns)
-                        return f"❌ {name} missing columns: {', '.join(missing_cols)}. Available: {', '.join(available_cols)}"
-                        
-                except pd.errors.EmptyDataError:
-                    return f"❌ {name} is empty or corrupted"
-                except pd.errors.ParserError as e:
-                    return f"❌ {name} format error: {str(e)[:100]}"
-                except UnicodeDecodeError:
-                    return f"❌ {name} encoding error. Try UTF-8 encoding"
-                    
-            except Exception as e:
-                return f"❌ Error validating {name}: {str(e)[:100]}"
+        # Check if all files are uploaded
+        uploaded_files = [f for f in files if f is not None]
+        if len(uploaded_files) == 0:
+            return "📋 Please upload your CSV files to begin analysis"
         
-        return None
+        if len(uploaded_files) < 4:
+            missing = [name for f, name in zip(files, file_names) if f is None]
+            return f"📋 Missing files: {', '.join(missing)}"
+        
+        # Validate each file
+        validation_results = []
+        for file, cols, name in zip(files, required_columns, file_names):
+            if file is not None:
+                result = self.validate_single_file(file, cols, name)
+                if result and "❌" in result:
+                    return result  # Return first error
+                elif result:
+                    validation_results.append(result)
+        
+        return None  # All validations passed
     
     def load_file_optimized(self, file_path: Union[str, object], columns: list = None, 
                            sample_rate: float = 1.0, max_rows: int = None):
@@ -924,6 +946,17 @@ def create_production_interface():
     }
     """
     
+    def validate_file_upload(file, required_cols, file_name):
+        """Validate file upload and return status message"""
+        if file is None:
+            return f"📁 Please upload {file_name}"
+        
+        try:
+            result = analyzer.validate_single_file(file, required_cols, file_name)
+            return result or f"✅ {file_name} ready for analysis"
+        except Exception as e:
+            return f"❌ Error with {file_name}: {str(e)[:100]}"
+    
     with gr.Blocks(
         title="Market Basket Analysis Dashboard - Ultra Optimized",
         theme=gr.themes.Soft(),
@@ -972,29 +1005,62 @@ def create_production_interface():
         with gr.Row():
             with gr.Column(scale=1):
                 gr.HTML("<h3 style='text-align: center; color: #333;'>📊 Transaction Data</h3>")
+                
                 orders_file = gr.File(
                     label="Orders CSV (order_id, user_id)", 
                     file_types=[".csv"],
                     elem_id="orders_upload"
                 )
+                orders_status = gr.Markdown("📁 Please upload Orders CSV file")
+                
                 products_file = gr.File(
                     label="Products CSV (product_id, product_name, aisle_id)", 
                     file_types=[".csv"],
                     elem_id="products_upload"
                 )
+                products_status = gr.Markdown("📁 Please upload Products CSV file")
             
             with gr.Column(scale=1):
                 gr.HTML("<h3 style='text-align: center; color: #333;'>🛍️ Product Data</h3>")
+                
                 order_products_file = gr.File(
                     label="Order Products CSV (order_id, product_id)", 
                     file_types=[".csv"],
                     elem_id="order_products_upload"
                 )
+                order_products_status = gr.Markdown("📁 Please upload Order Products CSV file")
+                
                 aisles_file = gr.File(
                     label="Aisles CSV (aisle_id, aisle)", 
                     file_types=[".csv"],
                     elem_id="aisles_upload"
                 )
+                aisles_status = gr.Markdown("📁 Please upload Aisles CSV file")
+        
+        # File upload handlers
+        orders_file.change(
+            fn=lambda f: validate_file_upload(f, ['order_id', 'user_id'], 'Orders CSV'),
+            inputs=[orders_file],
+            outputs=[orders_status]
+        )
+        
+        order_products_file.change(
+            fn=lambda f: validate_file_upload(f, ['order_id', 'product_id'], 'Order Products CSV'),
+            inputs=[order_products_file],
+            outputs=[order_products_status]
+        )
+        
+        products_file.change(
+            fn=lambda f: validate_file_upload(f, ['product_id', 'product_name', 'aisle_id'], 'Products CSV'),
+            inputs=[products_file],
+            outputs=[products_status]
+        )
+        
+        aisles_file.change(
+            fn=lambda f: validate_file_upload(f, ['aisle_id', 'aisle'], 'Aisles CSV'),
+            inputs=[aisles_file],
+            outputs=[aisles_status]
+        )
         
         with gr.Row():
             analyze_button = gr.Button(
@@ -1008,7 +1074,7 @@ def create_production_interface():
         gr.HTML("""
         <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 10px; padding: 15px; margin: 20px 0; text-align: center;">
             <h4 style="margin: 0 0 10px 0; color: #2E7D32;">⚡ Ultra-Fast Processing Status</h4>
-            <p style="margin: 0; color: #388E3C;">Click "Run Analysis" to begin processing your large dataset with advanced optimizations</p>
+            <p style="margin: 0; color: #388E3C;">Upload all 4 CSV files, then click "Run Analysis" to begin processing with advanced optimizations</p>
         </div>
         """)
         
@@ -1110,6 +1176,27 @@ def create_production_interface():
         gr.HTML("""
         <div style="margin-top: 30px; padding: 20px; background: linear-gradient(135deg, #f8f9fa, #e9ecef); border-radius: 15px; text-align: center;">
             <div style="display: flex; justify-content: space-around; align-items: center; flex-wrap: wrap;">
+                <div style="margin: 10px;">
+                    <strong style="color: #495057;">🔧 Built with</strong><br>
+                    <span style="color: #6c757d;">Gradio + FastAPI</span>
+                </div>
+                <div style="margin: 10px;">
+                    <strong style="color: #495057;">⚡ Optimized for</strong><br>
+                    <span style="color: #6c757d;">800MB+ datasets</span>
+                </div>
+                <div style="margin: 10px;">
+                    <strong style="color: #495057;">🧠 Powered by</strong><br>
+                    <span style="color: #6c757d;">scikit-learn + MLxtend</span>
+                </div>
+                <div style="margin: 10px;">
+                    <strong style="color: #495057;">📊 Advanced</strong><br>
+                    <span style="color: #6c757d;">MiniBatch clustering</span>
+                </div>
+            </div>
+        </div>
+        """)
+    
+    return gradio_app-wrap: wrap;">
                 <div style="margin: 10px;">
                     <strong style="color: #495057;">🔧 Built with</strong><br>
                     <span style="color: #6c757d;">Gradio + FastAPI</span>
