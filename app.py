@@ -1067,7 +1067,7 @@ if __name__ == "__main__":
         
         gradio_app.launch(
             server_name="0.0.0.0",
-            server_port=PORT,
+            server_port=PORT,  # Use the dynamically set PORT
             show_error=True,
             debug=False  # Set to True for local debugging if needed
         )
