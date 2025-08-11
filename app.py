@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mlxtend.frequent_patterns import apriori, association_rules
+import uvicorn
 
 # Configure logging and suppress warnings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -33,9 +34,12 @@ os.environ["GRADIO_SHARE"] = "false"
 import matplotlib
 matplotlib.use('Agg')
 
+# Get port from environment or default to 8080
+PORT = int(os.environ.get("PORT", 8080))
+
 logging.info("🚀 Starting Market Basket Analysis Dashboard...")
 logging.info(f"Python version: {sys.version}")
-logging.info(f"Port: {os.environ.get('PORT', 8080)}")
+logging.info(f"Port: {PORT}")
 
 try:
     logging.info("✅ All libraries imported successfully")
@@ -45,19 +49,19 @@ except ImportError as e:
     sys.exit(1)
 
 class OptimizedMarketBasketAnalyzer:
-    """Ultra-optimized analyzer for handling 800MB+ files and 3.5M+ rows"""
+    """Ultra-optimized analyzer for handling 300MB+ files"""
     
     def __init__(self):
         # Aggressive optimization for large datasets
-        self.max_orders = 100000  # Increased but still manageable
-        self.chunk_size = 10000  # Larger chunks for efficiency
+        self.max_orders = 50000  # Reduced for better memory management
+        self.chunk_size = 5000   # Smaller chunks for very large files
         self.sample_rates = {
-            'orders': 0.05,  # 5% sample for very large datasets
-            'order_products': 0.03,  # 3% sample to manage memory
-            'large_threshold': 100 * 1024 * 1024  # 100MB threshold
+            'orders': 0.1,  # 10% sample for large datasets
+            'order_products': 0.08,  # 8% sample to manage memory
+            'large_threshold': 50 * 1024 * 1024  # 50MB threshold
         }
-        self.max_products = 500  # Reduced for memory efficiency
-        self.max_customers = 50000  # Limit customers for segmentation
+        self.max_products = 300  # Reduced for memory efficiency
+        self.max_customers = 30000  # Limit customers for segmentation
         
     def get_memory_usage(self) -> float:
         """Get current memory usage in MB"""
@@ -113,8 +117,8 @@ class OptimizedMarketBasketAnalyzer:
             if file_size == 0:
                 return f"❌ {file_name} appears to be empty"
                 
-            if file_size > 1200:  # 1.2GB limit
-                return f"❌ {file_name} too large ({file_size:.1f}MB). Max 1200MB per file."
+            if file_size > 800:  # 800MB limit per file
+                return f"❌ {file_name} too large ({file_size:.1f}MB). Max 800MB per file."
             
             # Quick structure validation
             try:
@@ -182,15 +186,15 @@ class OptimizedMarketBasketAnalyzer:
             logging.info(f"Loading {actual_path} ({file_size:.1f}MB), Memory: {self.get_memory_usage():.1f}MB")
             
             # Determine optimal strategy based on file size
-            if file_size > 200:  # Very large files
-                logging.info(f"Very large file detected, using aggressive chunking")
+            if file_size > self.sample_rates['large_threshold'] / (1024 * 1024):  # 50MB+
+                logging.info(f"Large file detected, using chunked reading with sampling")
                 
                 chunks = []
                 total_rows = 0
-                rows_to_process = max_rows or (self.max_orders * 3)
+                rows_to_process = max_rows or self.max_orders
                 
                 # Use smaller chunk size for very large files
-                chunk_size = min(self.chunk_size, 5000)
+                chunk_size = self.chunk_size
                 
                 try:
                     chunk_reader = pd.read_csv(
@@ -218,9 +222,11 @@ class OptimizedMarketBasketAnalyzer:
                         if critical_cols:
                             chunk = chunk.dropna(subset=critical_cols)
                         
+                        # Apply sampling for large files
                         if sample_rate < 1.0 and len(chunk) > 0:
                             sample_size = max(1, int(len(chunk) * sample_rate))
-                            chunk = chunk.sample(n=sample_size, random_state=42)
+                            if sample_size < len(chunk):
+                                chunk = chunk.sample(n=sample_size, random_state=42)
                         
                         if len(chunk) > 0:
                             chunks.append(chunk)
@@ -243,7 +249,7 @@ class OptimizedMarketBasketAnalyzer:
                 except Exception as chunk_error:
                     logging.error(f"Chunked reading failed: {chunk_error}")
                     # Fallback to regular reading with smaller nrows
-                    return self._fallback_load(actual_path, columns, 10000)
+                    return self._fallback_load(actual_path, columns, 5000)
                 
             else:
                 # Normal loading for smaller files
@@ -257,10 +263,11 @@ class OptimizedMarketBasketAnalyzer:
                 
                 logging.info(f"Loaded {len(df):,} rows, Memory: {self.get_memory_usage():.1f}MB")
                 
-                if sample_rate < 1.0 and len(df) > 0:
-                    sample_size = max(1, int(len(df) * sample_rate))
-                    df = df.sample(n=sample_size, random_state=42)
-                    logging.info(f"Sampled to {len(df):,} rows, Memory: {self.get_memory_usage():.1f}MB")
+                if sample_rate < 1.0 and len(df) > 10000:  # Only sample if dataset is reasonably large
+                    sample_size = max(1000, int(len(df) * sample_rate))
+                    if sample_size < len(df):
+                        df = df.sample(n=sample_size, random_state=42)
+                        logging.info(f"Sampled to {len(df):,} rows, Memory: {self.get_memory_usage():.1f}MB")
                 
                 if max_rows and len(df) > max_rows:
                     df = df.sample(n=max_rows, random_state=42)
@@ -270,7 +277,7 @@ class OptimizedMarketBasketAnalyzer:
                 
         except Exception as e:
             logging.error(f"Error loading file {actual_path}: {str(e)}")
-            return self._fallback_load(actual_path, columns, 5000)
+            return self._fallback_load(actual_path, columns, 2000)
     
     def _fallback_load(self, file_path: str, columns: list, nrows: int):
         """Emergency fallback loading with minimal rows"""
@@ -287,8 +294,8 @@ class OptimizedMarketBasketAnalyzer:
         try:
             logging.info(f"Starting market basket analysis with {len(data):,} records, Memory: {self.get_memory_usage():.1f}MB")
             
-            if len(data) < 100:
-                return "❌ Need at least 100 records for meaningful market basket analysis"
+            if len(data) < 50:
+                return "❌ Need at least 50 records for meaningful market basket analysis"
             
             # Aggressive product filtering for memory management
             product_counts = data['product_name'].value_counts()
@@ -299,10 +306,10 @@ class OptimizedMarketBasketAnalyzer:
             
             # Sample orders if too many
             unique_orders = data['order_id'].nunique()
-            if unique_orders > 20000:
-                sample_orders = data['order_id'].unique()[:20000]
+            if unique_orders > 10000:
+                sample_orders = data['order_id'].unique()[:10000]
                 data = data[data['order_id'].isin(sample_orders)]
-                logging.info(f"Sampled to 20,000 orders, Memory: {self.get_memory_usage():.1f}MB")
+                logging.info(f"Sampled to 10,000 orders, Memory: {self.get_memory_usage():.1f}MB")
             
             # Create transaction matrix with chunking
             logging.info("Creating transaction matrix...")
@@ -310,20 +317,20 @@ class OptimizedMarketBasketAnalyzer:
                         .size().unstack(fill_value=0))
             
             # Memory check
-            if self.get_memory_usage() > 1500:  # If memory usage > 1.5GB
+            if self.get_memory_usage() > 1000:  # If memory usage > 1GB
                 logging.warning("High memory usage detected, reducing dataset size")
-                basket_df = basket_df.sample(n=min(10000, len(basket_df)), random_state=42)
+                basket_df = basket_df.sample(n=min(5000, len(basket_df)), random_state=42)
             
             # Convert to boolean for Apriori
             basket_bool = basket_df > 0
             
             logging.info(f"Transaction matrix: {basket_bool.shape[0]} orders × {basket_bool.shape[1]} products, Memory: {self.get_memory_usage():.1f}MB")
             
-            if basket_bool.shape[0] < 20:
-                return "❌ Need at least 20 orders after filtering"
+            if basket_bool.shape[0] < 10:
+                return "❌ Need at least 10 orders after filtering"
             
             # Adaptive support threshold based on dataset size
-            min_support = max(0.005, 20 / basket_bool.shape[0])  # At least 20 transactions or 0.5%
+            min_support = max(0.01, 10 / basket_bool.shape[0])  # At least 10 transactions or 1%
             
             logging.info(f"Running Apriori with min_support={min_support:.4f}")
             
@@ -339,7 +346,7 @@ class OptimizedMarketBasketAnalyzer:
                 
                 if frequent_itemsets.empty:
                     # Retry with lower threshold
-                    min_support = max(0.001, 5 / basket_bool.shape[0])
+                    min_support = max(0.005, 3 / basket_bool.shape[0])
                     frequent_itemsets = apriori(
                         basket_bool, 
                         min_support=min_support, 
@@ -349,10 +356,10 @@ class OptimizedMarketBasketAnalyzer:
                     )
             except Exception as e:
                 logging.error(f"Apriori failed: {e}")
-                return f"❌ Market basket analysis failed due to memory constraints. Try with a smaller dataset."
+                return f"❌ Market basket analysis failed due to memory constraints. Dataset may be too sparse."
             
             if frequent_itemsets.empty:
-                return "❌ No frequent patterns found. Data may be too sparse."
+                return "❌ No frequent patterns found. Data may be too sparse or need more transactions."
             
             logging.info(f"Found {len(frequent_itemsets)} frequent itemsets, Memory: {self.get_memory_usage():.1f}MB")
             
@@ -376,10 +383,10 @@ class OptimizedMarketBasketAnalyzer:
                 (rules['confidence'] >= 0.2) & 
                 (rules['lift'] >= 1.1) & 
                 (rules['support'] >= min_support)
-            ].sort_values('lift', ascending=False).head(15)
+            ].sort_values('lift', ascending=False).head(10)
             
             if good_rules.empty:
-                good_rules = rules.sort_values('lift', ascending=False).head(10)
+                good_rules = rules.sort_values('lift', ascending=False).head(5)
             
             # Format results
             result_lines = [
@@ -431,17 +438,17 @@ class OptimizedMarketBasketAnalyzer:
             
             logging.info(f"Customer matrix: {customer_aisle.shape[0]} customers × {customer_aisle.shape[1]} aisles, Memory: {self.get_memory_usage():.1f}MB")
             
-            if customer_aisle.shape[0] < 10:
-                return "❌ Need at least 10 customers for segmentation", ""
+            if customer_aisle.shape[0] < 5:
+                return "❌ Need at least 5 customers for segmentation", ""
             
             # Remove zero-variance columns and limit features
             customer_aisle = customer_aisle.loc[:, (customer_aisle != 0).any(axis=0)]
             
             # Limit to top aisles if too many
-            if customer_aisle.shape[1] > 50:
-                top_aisles = customer_aisle.sum().nlargest(50).index
+            if customer_aisle.shape[1] > 30:
+                top_aisles = customer_aisle.sum().nlargest(30).index
                 customer_aisle = customer_aisle[top_aisles]
-                logging.info(f"Limited to top 50 aisles, Memory: {self.get_memory_usage():.1f}MB")
+                logging.info(f"Limited to top 30 aisles, Memory: {self.get_memory_usage():.1f}MB")
             
             if customer_aisle.shape[1] < 2:
                 return "❌ Need more diverse shopping patterns for segmentation", ""
@@ -452,7 +459,7 @@ class OptimizedMarketBasketAnalyzer:
             scaled_features = np.nan_to_num(scaled_features, 0)
             
             # Use MiniBatchKMeans for large datasets
-            n_clusters = min(8, max(3, customer_aisle.shape[0] // 20))
+            n_clusters = min(6, max(2, customer_aisle.shape[0] // 15))
             
             logging.info(f"Creating {n_clusters} segments using MiniBatchKMeans, Memory: {self.get_memory_usage():.1f}MB")
             
@@ -460,9 +467,9 @@ class OptimizedMarketBasketAnalyzer:
             kmeans = MiniBatchKMeans(
                 n_clusters=n_clusters, 
                 random_state=42, 
-                batch_size=min(1000, customer_aisle.shape[0] // 2),
+                batch_size=min(500, customer_aisle.shape[0] // 2),
                 n_init=3,  # Reduced for speed
-                max_iter=100  # Reduced for speed
+                max_iter=50  # Reduced for speed
             )
             cluster_labels = kmeans.fit_predict(scaled_features)
             
@@ -485,22 +492,22 @@ class OptimizedMarketBasketAnalyzer:
                 cluster_pct = (cluster_size / len(cluster_labels)) * 100
                 
                 # Get top shopping categories
-                top_categories = cluster_profiles.iloc[cluster_id].nlargest(5)
+                top_categories = cluster_profiles.iloc[cluster_id].nlargest(3)
                 top_categories = top_categories[top_categories > 0.1]
                 
                 if len(top_categories) > 0:
                     categories_str = ', '.join([
                         f"{cat.replace('_', ' ').title()} ({score:.1f})" 
-                        for cat, score in top_categories.items()[:3]
+                        for cat, score in top_categories.items()
                     ])
                     
                     # Determine segment type
                     avg_intensity = top_categories.iloc[0]
-                    if avg_intensity > 10:
+                    if avg_intensity > 8:
                         segment_type = "Heavy Shoppers"
-                    elif avg_intensity > 5:
+                    elif avg_intensity > 4:
                         segment_type = "Regular Shoppers"  
-                    elif avg_intensity > 2:
+                    elif avg_intensity > 1.5:
                         segment_type = "Moderate Shoppers"
                     else:
                         segment_type = "Light Shoppers"
@@ -528,11 +535,11 @@ class OptimizedMarketBasketAnalyzer:
     
     def _get_behavior_insights(self, intensity: float, categories) -> str:
         """Generate behavioral insights for customer segments"""
-        if intensity > 10:
+        if intensity > 8:
             return f"High-volume shoppers, strong preference for {categories.index[0].replace('_', ' ')}"
-        elif intensity > 5:
+        elif intensity > 4:
             return f"Regular shoppers with focus on {len(categories)} main categories"
-        elif intensity > 2:
+        elif intensity > 1.5:
             return "Moderate shoppers, likely price-conscious"
         else:
             return "Light shoppers, potential for engagement campaigns"
@@ -543,53 +550,53 @@ class OptimizedMarketBasketAnalyzer:
             logging.info(f"Creating visualization, Memory: {self.get_memory_usage():.1f}MB")
             
             plt.style.use('default')
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
             fig.patch.set_facecolor('white')
             
             # Segment size distribution
             cluster_counts = pd.Series(clusters).value_counts().sort_index()
-            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#F0A500', '#A0E7E5'][:len(cluster_counts)]
+            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'][:len(cluster_counts)]
             
             bars = ax1.bar([f'Segment {i+1}' for i in cluster_counts.index], 
                           cluster_counts.values, color=colors, edgecolor='white', linewidth=2)
-            ax1.set_title('Customer Segment Distribution', fontweight='bold', fontsize=16, pad=20)
-            ax1.set_xlabel('Segment', fontsize=12)
-            ax1.set_ylabel('Number of Customers', fontsize=12)
+            ax1.set_title('Customer Segment Distribution', fontweight='bold', fontsize=14, pad=15)
+            ax1.set_xlabel('Segment', fontsize=11)
+            ax1.set_ylabel('Number of Customers', fontsize=11)
             ax1.grid(axis='y', alpha=0.3)
             
             # Add count labels on bars
             for bar in bars:
                 height = bar.get_height()
                 ax1.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{int(height):,}', ha='center', va='bottom', fontweight='bold', fontsize=11)
+                        f'{int(height):,}', ha='center', va='bottom', fontweight='bold', fontsize=10)
             
             # Category heatmap - limit to top categories
             if not profiles.empty:
-                top_categories = profiles.mean(axis=0).nlargest(min(12, profiles.shape[1]))
+                top_categories = profiles.mean(axis=0).nlargest(min(10, profiles.shape[1]))
                 heatmap_data = profiles[top_categories.index]
                 
                 # Clean category names
-                display_categories = [cat.replace('_', ' ').title()[:15] for cat in heatmap_data.columns]
+                display_categories = [cat.replace('_', ' ').title()[:12] for cat in heatmap_data.columns]
                 heatmap_display = heatmap_data.copy()
                 heatmap_display.columns = display_categories
                 
                 sns.heatmap(heatmap_display.T, annot=True, cmap='YlOrRd', ax=ax2, 
                            cbar_kws={'label': 'Purchase Frequency'}, fmt='.1f',
                            xticklabels=[f'S{i+1}' for i in range(len(heatmap_display))],
-                           annot_kws={'size': 10})
-                ax2.set_title('Shopping Patterns by Segment', fontweight='bold', fontsize=16, pad=20)
-                ax2.set_xlabel('Segment', fontsize=12)
-                ax2.set_ylabel('Product Category', fontsize=12)
+                           annot_kws={'size': 9})
+                ax2.set_title('Shopping Patterns by Segment', fontweight='bold', fontsize=14, pad=15)
+                ax2.set_xlabel('Segment', fontsize=11)
+                ax2.set_ylabel('Product Category', fontsize=11)
                 
                 # Rotate y labels for better readability
-                ax2.set_yticklabels(ax2.get_yticklabels(), rotation=0, fontsize=10)
+                ax2.set_yticklabels(ax2.get_yticklabels(), rotation=0, fontsize=9)
             
-            plt.tight_layout(pad=3.0)
+            plt.tight_layout(pad=2.0)
             
             # Convert to base64 with optimization
             buffer = io.BytesIO()
-            plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', 
-                       facecolor='white', edgecolor='none', optimize=True)
+            plt.savefig(buffer, format='png', dpi=120, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none')
             buffer.seek(0)
             img_data = base64.b64encode(buffer.read()).decode()
             plt.close('all')
@@ -611,33 +618,27 @@ class OptimizedMarketBasketAnalyzer:
             
             # Enhanced cross-selling recommendations
             if "❌" not in market_result and "association rules" in market_result.lower():
-                cross_sell = """🎯 **ADVANCED CROSS-SELLING STRATEGY**
+                cross_sell = """🎯 **CROSS-SELLING STRATEGY**
 
-**🚀 Immediate Implementation:**
-1. **Smart Product Bundles**: Create bundles based on discovered associations with 5-10% discount
-2. **Dynamic Store Layout**: Position complementary products within 3 feet of each other
-3. **AI-Powered Recommendations**: Implement "Frequently Bought Together" on website/app
-4. **Staff Training Program**: Train associates on top 10 product associations
+**🚀 Immediate Actions:**
+1. **Product Bundles**: Create bundles based on discovered associations with 5-10% discount
+2. **Store Layout**: Position complementary products within 3 feet of each other
+3. **Online Recommendations**: Implement "Frequently Bought Together" section
+4. **Staff Training**: Train associates on top product associations
 
-**📱 Digital Marketing Tactics:**
-• **Email Automation**: Send cross-sell emails 2-3 days after purchase
-• **Retargeting Campaigns**: Show complementary products to recent buyers
-• **Mobile App Push**: Real-time suggestions when customers are in-store
-• **Social Proof**: Display "Customers also bought" with purchase statistics
+**📱 Digital Implementation:**
+• **Email Campaigns**: Send cross-sell emails 2-3 days after purchase
+• **Website**: Show complementary products on product pages
+• **Mobile App**: Real-time suggestions during shopping
+• **Social Proof**: Display "Customers also bought" statistics
 
-**📊 Performance Monitoring:**
+**📊 Success Metrics:**
 • Track cross-sell conversion rates by product pair
 • Monitor average order value increases
 • A/B test different recommendation placements
-• Measure incremental revenue from associations
-
-**🎯 Advanced Techniques:**
-• **Seasonal Adjustments**: Modify associations for holidays/seasons
-• **Inventory Management**: Use associations for demand forecasting
-• **Pricing Strategy**: Bundle pricing optimization
-• **Customer Journey**: Map associations across purchase timeline"""
+• Measure incremental revenue from associations"""
             else:
-                cross_sell = """🎯 **CROSS-SELLING FOUNDATION STRATEGY**
+                cross_sell = """🎯 **CROSS-SELLING FOUNDATION**
 
 **📋 Data Collection Phase:**
 Current analysis needs more data for strong associations. Focus on:
@@ -645,56 +646,25 @@ Current analysis needs more data for strong associations. Focus on:
 • **Increase Data Volume**: Collect 6+ months of transaction data
 • **Data Quality**: Ensure all product categories are captured
 • **Customer Behavior**: Track online browsing patterns
-• **External Data**: Consider seasonal trends and competitor analysis
-
-**🔄 Process Improvements:**
-• **Transaction Tracking**: Implement detailed basket analysis
-• **Customer Surveys**: Ask about product preferences and needs
-• **Market Research**: Study industry cross-selling benchmarks
-• **Pilot Programs**: Test small-scale cross-selling initiatives"""
+• **External Data**: Consider seasonal trends and competitor analysis"""
 
             # Enhanced upselling recommendations  
             if "❌" not in segment_result and "segment" in segment_result.lower():
-                upsell = """📈 **STRATEGIC UPSELLING FRAMEWORK**
+                upsell = """📈 **UPSELLING STRATEGY**
 
-**🎯 Segment-Specific Strategies:**
-1. **Heavy Shoppers (High Value)**:
-   - Premium product line introductions
-   - VIP early access to new products
-   - Volume-based tier rewards (spend $X, get Y% off)
-   - Personal shopping consultant services
+**🎯 Segment-Specific Approaches:**
+1. **Heavy Shoppers**: Premium product introductions, VIP access
+2. **Regular Shoppers**: Loyalty rewards, "next level" suggestions
+3. **Moderate Shoppers**: Limited-time upgrade offers, samples
+4. **Light Shoppers**: Entry-level premium options, clear value props
 
-2. **Regular Shoppers (Core Base)**:
-   - Loyalty point multipliers for premium purchases
-   - "Next level" product suggestions
-   - Member-exclusive premium product trials
-   - Referral bonuses for bringing friends
-
-3. **Moderate Shoppers (Growth Potential)**:
-   - Limited-time upgrade offers
-   - "Try premium for free" samples
-   - Educational content about premium benefits
-   - Social proof messaging ("Most customers upgrade to...")
-
-4. **Light Shoppers (Activation Focus)**:
-   - Entry-level premium options
-   - Small commitment upgrades
-   - "First purchase" premium discounts
-   - Clear value proposition messaging
-
-**💡 Implementation Tactics:**
+**💡 Implementation:**
 • **Personalized Pricing**: Dynamic pricing based on segment
 • **Progressive Disclosure**: Gradually introduce premium options
 • **Social Proof**: Show segment-specific success stories
-• **Scarcity Marketing**: Limited-time offers for premium products
-
-**📊 Success Metrics:**
-• Average order value by segment
-• Premium product adoption rates
-• Customer lifetime value progression
-• Segment migration tracking"""
+• **Scarcity Marketing**: Limited-time offers for premium products"""
             else:
-                upsell = """📈 **UPSELLING FOUNDATION STRATEGY**
+                upsell = """📈 **UPSELLING FOUNDATION**
 
 **🏗️ Infrastructure Development:**
 Current segmentation needs enhancement. Priority actions:
@@ -702,13 +672,7 @@ Current segmentation needs enhancement. Priority actions:
 • **Enhanced Segmentation**: Collect behavioral and demographic data
 • **Value Analysis**: Identify high-value customer characteristics  
 • **Product Tiers**: Develop clear premium product hierarchy
-• **Customer Journey**: Map upgrade touchpoints and opportunities
-
-**🔬 Research Phase:**
-• **Customer Interviews**: Understand upgrade motivations
-• **Competitive Analysis**: Study premium positioning strategies
-• **Price Sensitivity**: Test different premium price points
-• **Value Proposition**: Define clear premium benefits"""
+• **Customer Journey**: Map upgrade touchpoints and opportunities"""
 
             logging.info(f"Recommendations generated, Memory: {self.get_memory_usage():.1f}MB")
             return cross_sell, upsell
@@ -733,7 +697,7 @@ Current segmentation needs enhancement. Priority actions:
             product_info = products_df.merge(aisles_df, on='aisle_id', how='left')
             
             # Step 3: Chunked merging for large datasets
-            chunk_size = 20000
+            chunk_size = 10000
             merged_chunks = []
             
             for start in range(0, len(order_products_filtered), chunk_size):
@@ -781,9 +745,9 @@ Current segmentation needs enhancement. Priority actions:
             raise e
     
     def run_complete_analysis(self, orders_file, order_products_file, products_file, aisles_file) -> Tuple[str, str, str, str, str]:
-        """Ultra-optimized analysis pipeline for handling 800MB+ files and 3.5M+ rows"""
+        """Ultra-optimized analysis pipeline for handling 300MB+ files"""
         try:
-            logging.info(f"🚀 Starting ultra-optimized analysis, Memory: {self.get_memory_usage():.1f}MB")
+            logging.info(f"🚀 Starting optimized analysis, Memory: {self.get_memory_usage():.1f}MB")
             
             # Phase 1: Validation
             files = [orders_file, order_products_file, products_file, aisles_file]
@@ -804,9 +768,9 @@ Current segmentation needs enhancement. Priority actions:
             # Phase 2: Smart Data Loading
             logging.info("📂 Loading datasets with optimization...")
             
-            # Load orders with aggressive sampling for very large files
+            # Load orders with sampling for large files
             orders_file_size = self.get_file_size_mb(orders_file)
-            orders_sample_rate = self.sample_rates['orders'] if orders_file_size > 200 else 0.2
+            orders_sample_rate = self.sample_rates['orders'] if orders_file_size > 100 else 0.3
             
             orders_df = self.load_file_optimized(
                 orders_file, 
@@ -820,8 +784,8 @@ Current segmentation needs enhancement. Priority actions:
             
             logging.info(f"📊 Loaded {len(orders_df):,} orders from {orders_df['user_id'].nunique():,} customers")
             
-            # Load order products filtered by available orders
-            order_products_sample_rate = self.sample_rates['order_products'] if self.get_file_size_mb(order_products_file) > 200 else 0.3
+            # Load order products
+            order_products_sample_rate = self.sample_rates['order_products'] if self.get_file_size_mb(order_products_file) > 100 else 0.4
             
             order_products_df = self.load_file_optimized(
                 order_products_file,
@@ -858,7 +822,7 @@ Current segmentation needs enhancement. Priority actions:
             logging.info("🔄 Merging datasets...")
             merged_data = self.merge_datasets_optimized(orders_df, order_products_df, products_df, aisles_df)
             
-            if len(merged_data) < 100:
+            if len(merged_data) < 50:
                 return "❌ Insufficient data after merging. Check file compatibility.", "", "", "", ""
             
             # Clean up intermediate data
@@ -898,7 +862,7 @@ Current segmentation needs enhancement. Priority actions:
             return error_msg, "", "", "", ""
 
 def create_production_interface():
-    """Create ultra-optimized production interface"""
+    """Create optimized production interface"""
     
     analyzer = OptimizedMarketBasketAnalyzer()
     
@@ -906,11 +870,11 @@ def create_production_interface():
     custom_css = """
     body {
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        max-width: 1400px;
+        max-width: 1200px;
         margin: auto;
     }
     .gradio-container {
-        max-width: 1400px !important;
+        max-width: 1200px !important;
     }
     .upload-container {
         border: 2px dashed #e0e0e0;
@@ -922,27 +886,6 @@ def create_production_interface():
     .upload-container:hover {
         border-color: #4CAF50;
         background-color: #f9f9f9;
-    }
-    .status-indicator {
-        padding: 10px;
-        border-radius: 5px;
-        margin: 10px 0;
-        font-weight: bold;
-    }
-    .success {
-        background-color: #d4edda;
-        color: #155724;
-        border: 1px solid #c3e6cb;
-    }
-    .error {
-        background-color: #f8d7da;
-        color: #721c24;
-        border: 1px solid #f5c6cb;
-    }
-    .warning {
-        background-color: #fff3cd;
-        color: #856404;
-        border: 1px solid #ffeaa7;
     }
     """
     
@@ -958,48 +901,42 @@ def create_production_interface():
             return f"❌ Error with {file_name}: {str(e)[:100]}"
     
     with gr.Blocks(
-        title="Market Basket Analysis Dashboard - Ultra Optimized",
+        title="Market Basket Analysis Dashboard - Optimized",
         theme=gr.themes.Soft(),
         css=custom_css
     ) as gradio_app:
         
         gr.HTML("""
-        <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea, #764ba2); color: white; border-radius: 15px; margin-bottom: 20px;">
-            <h1 style="margin: 0; font-size: 2.5em; font-weight: 700;">🛒 Market Basket Analysis Dashboard</h1>
-            <p style="margin: 15px 0; font-size: 1.2em; opacity: 0.9;">Ultra-Optimized for Large Datasets (800MB+, 3.5M+ rows)</p>
-            <div style="background: rgba(255,255,255,0.2); padding: 10px; border-radius: 8px; margin-top: 15px;">
-                <span style="font-size: 0.9em;">✨ Intelligent sampling • 🚀 Memory optimization • 📊 Advanced analytics</span>
+        <div style="text-align: center; padding: 25px; background: linear-gradient(135deg, #667eea, #764ba2); color: white; border-radius: 12px; margin-bottom: 20px;">
+            <h1 style="margin: 0; font-size: 2.2em; font-weight: 700;">🛒 Market Basket Analysis Dashboard</h1>
+            <p style="margin: 10px 0; font-size: 1.1em; opacity: 0.9;">Optimized for Large Datasets (300MB+ files)</p>
+            <div style="background: rgba(255,255,255,0.2); padding: 8px; border-radius: 6px; margin-top: 10px;">
+                <span style="font-size: 0.85em;">✨ Smart sampling • 🚀 Memory optimization • 📊 Advanced analytics</span>
             </div>
         </div>
         """)
         
-        with gr.Accordion("📋 Ultra-Large Dataset Guide", open=False):
+        with gr.Accordion("📋 Large Dataset Guide", open=False):
             gr.Markdown("""
-            **🎯 Optimized for Enterprise-Scale Data:**
+            **🎯 Optimized for Enterprise Data:**
             
             | File | Size Limit | Expected Columns | Processing Notes |
             |------|------------|------------------|------------------|
-            | **orders.csv** | Up to 1.2GB | `order_id`, `user_id` | Auto-sampled at 5% for files >200MB |
-            | **order_products.csv** | Up to 1.2GB | `order_id`, `product_id` | Auto-sampled at 3% for files >200MB |
-            | **products.csv** | Up to 500MB | `product_id`, `product_name`, `aisle_id` | Fully processed |
-            | **aisles.csv** | Up to 100MB | `aisle_id`, `aisle` | Fully processed |
+            | **orders.csv** | Up to 800MB | `order_id`, `user_id` | Auto-sampled at 10% for files >100MB |
+            | **order_products.csv** | Up to 800MB | `order_id`, `product_id` | Auto-sampled at 8% for files >100MB |
+            | **products.csv** | Up to 200MB | `product_id`, `product_name`, `aisle_id` | Fully processed |
+            | **aisles.csv** | Up to 50MB | `aisle_id`, `aisle` | Fully processed |
             
-            **⚡ Performance Optimizations:**
-            - **Intelligent Chunking**: Processes data in optimized chunks to prevent memory overflow
-            - **Adaptive Sampling**: Automatically samples large datasets while preserving statistical significance
-            - **Memory Management**: Aggressive cleanup and MiniBatch algorithms for large-scale analysis
-            - **Smart Filtering**: Limits analysis to top products/customers for meaningful insights
+            **⚡ Performance Features:**
+            - **Smart Chunking**: Processes large files in manageable pieces
+            - **Adaptive Sampling**: Maintains statistical significance while managing memory
+            - **MiniBatch Processing**: Efficient algorithms for large-scale analysis
+            - **Memory Management**: Aggressive cleanup and optimization
             
-            **🎯 Best Results With:**
-            - At least 10,000 orders and 50,000 order items
-            - Minimum 6 months of transaction data
-            - Clean, consistent product naming
-            - UTF-8 encoded CSV files
-            
-            **⏱️ Expected Processing Time:**
-            - Small datasets (<100MB): 1-3 minutes
-            - Medium datasets (100-400MB): 3-8 minutes  
-            - Large datasets (400MB-1GB): 8-15 minutes
+            **📊 Best Results With:**
+            - At least 5,000 orders and 20,000 order items
+            - Minimum 3 months of transaction data
+            - Clean, UTF-8 encoded CSV files
             """)
         
         with gr.Row():
@@ -1008,15 +945,13 @@ def create_production_interface():
                 
                 orders_file = gr.File(
                     label="Orders CSV (order_id, user_id)", 
-                    file_types=[".csv"],
-                    elem_id="orders_upload"
+                    file_types=[".csv"]
                 )
                 orders_status = gr.Markdown("📁 Please upload Orders CSV file")
                 
                 products_file = gr.File(
                     label="Products CSV (product_id, product_name, aisle_id)", 
-                    file_types=[".csv"],
-                    elem_id="products_upload"
+                    file_types=[".csv"]
                 )
                 products_status = gr.Markdown("📁 Please upload Products CSV file")
             
@@ -1025,15 +960,13 @@ def create_production_interface():
                 
                 order_products_file = gr.File(
                     label="Order Products CSV (order_id, product_id)", 
-                    file_types=[".csv"],
-                    elem_id="order_products_upload"
+                    file_types=[".csv"]
                 )
                 order_products_status = gr.Markdown("📁 Please upload Order Products CSV file")
                 
                 aisles_file = gr.File(
                     label="Aisles CSV (aisle_id, aisle)", 
-                    file_types=[".csv"],
-                    elem_id="aisles_upload"
+                    file_types=[".csv"]
                 )
                 aisles_status = gr.Markdown("📁 Please upload Aisles CSV file")
         
@@ -1064,108 +997,48 @@ def create_production_interface():
         
         with gr.Row():
             analyze_button = gr.Button(
-                "🚀 Run Ultra-Optimized Analysis", 
+                "🚀 Run Optimized Analysis", 
                 variant="primary", 
                 size="lg",
-                elem_id="analyze_btn",
                 scale=2
             )
-            
-        gr.HTML("""
-        <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 10px; padding: 15px; margin: 20px 0; text-align: center;">
-            <h4 style="margin: 0 0 10px 0; color: #2E7D32;">⚡ Ultra-Fast Processing Status</h4>
-            <p style="margin: 0; color: #388E3C;">Upload all 4 CSV files, then click "Run Analysis" to begin processing with advanced optimizations</p>
-        </div>
-        """)
         
-        with gr.Tabs() as tabs:
-            with gr.TabItem("📊 Market Basket Analysis", elem_id="market_tab"):
+        with gr.Tabs():
+            with gr.TabItem("📊 Market Basket Analysis"):
                 market_results = gr.Markdown(
-                    value="""
-## 🔍 Market Basket Analysis Results
-
-**Ready to analyze your data!** Upload your files and click the analysis button to discover:
-
-- **Product Associations**: Which items are frequently bought together
-- **Cross-selling Opportunities**: High-value product combinations  
-- **Purchase Patterns**: Statistical relationships in customer behavior
-- **Actionable Insights**: Specific recommendations for increasing sales
-
-*Processing will begin once you start the analysis...*
-                    """,
-                    elem_id="market_results"
+                    value="## 🔍 Market Basket Analysis Results\n\n**Ready to analyze!** Upload your files and click the analysis button to discover product associations and cross-selling opportunities.",
                 )
             
-            with gr.TabItem("👥 Customer Segmentation", elem_id="segments_tab"):
+            with gr.TabItem("👥 Customer Segmentation"):
                 with gr.Row():
                     with gr.Column(scale=2):
                         segment_results = gr.Markdown(
-                            value="""
-## 👥 Customer Segment Analysis
-
-**Customer segmentation will reveal:**
-
-- **Behavioral Groups**: Customers with similar shopping patterns
-- **Value Segments**: High, medium, and low-value customer groups
-- **Category Preferences**: What each segment prefers to buy
-- **Targeting Opportunities**: How to market to each group effectively
-
-*Advanced MiniBatch clustering optimized for large datasets*
-                            """,
-                            elem_id="segment_results"
+                            value="## 👥 Customer Segment Analysis\n\n**Customer segmentation will reveal** behavioral groups, value segments, and targeting opportunities.",
                         )
                     with gr.Column(scale=1):
                         segment_viz = gr.HTML(
                             value="""
-                            <div style="background: #f8f9fa; border: 2px dashed #dee2e6; border-radius: 15px; padding: 40px; text-align: center; color: #6c757d;">
-                                <div style="font-size: 3em; margin-bottom: 15px;">📊</div>
-                                <h4>Interactive Visualization</h4>
-                                <p>Advanced segment visualization will appear here after analysis</p>
-                                <small>Includes distribution charts and heatmaps</small>
+                            <div style="background: #f8f9fa; border: 2px dashed #dee2e6; border-radius: 12px; padding: 30px; text-align: center; color: #6c757d;">
+                                <div style="font-size: 2.5em; margin-bottom: 10px;">📊</div>
+                                <h4>Visualization</h4>
+                                <p>Charts will appear after analysis</p>
                             </div>
                             """,
-                            elem_id="segment_viz"
                         )
             
-            with gr.TabItem("💡 Business Recommendations", elem_id="recommendations_tab"):
-                gr.HTML("<h2 style='text-align: center; color: #333; margin-bottom: 30px;'>🎯 Actionable Business Strategy</h2>")
+            with gr.TabItem("💡 Business Recommendations"):
+                gr.HTML("<h2 style='text-align: center; color: #333; margin-bottom: 25px;'>🎯 Business Strategy</h2>")
                 with gr.Row():
                     with gr.Column():
                         cross_sell_recs = gr.Markdown(
-                            value="""
-## 🎯 Cross-Selling Strategy
-
-**Data-driven cross-selling recommendations will include:**
-
-- **Product Bundle Opportunities**: Which items to package together
-- **Store Layout Optimization**: Where to place complementary products  
-- **Digital Marketing**: Personalized recommendation strategies
-- **Staff Training**: Key product combinations to promote
-- **Performance Metrics**: How to measure cross-selling success
-
-*Advanced association rule mining will identify the strongest product relationships*
-                            """,
-                            elem_id="cross_sell"
+                            value="## 🎯 Cross-Selling Strategy\n\n**Data-driven recommendations** will include product bundles, store layout optimization, and digital marketing strategies.",
                         )
                     with gr.Column():
                         upsell_recs = gr.Markdown(
-                            value="""
-## 📈 Upselling Strategy  
-
-**Segment-based upselling strategies will provide:**
-
-- **Customer-Specific Approaches**: Tailored tactics for each segment
-- **Premium Product Positioning**: How to introduce higher-value items
-- **Loyalty Programs**: Tier-based reward strategies
-- **Personalization Tactics**: Individual customer targeting methods
-- **Success Metrics**: KPIs to track upselling performance
-
-*Machine learning-powered segmentation enables precise targeting*
-                            """,
-                            elem_id="upsell"
+                            value="## 📈 Upselling Strategy\n\n**Segment-based approaches** will provide customer-specific tactics and premium product positioning strategies.",
                         )
         
-        # Event handler with progress tracking
+        # Event handler
         analyze_button.click(
             fn=analyzer.run_complete_analysis,
             inputs=[orders_file, order_products_file, products_file, aisles_file],
@@ -1174,56 +1047,23 @@ def create_production_interface():
         )
         
         gr.HTML("""
-        <div style="margin-top: 30px; padding: 20px; background: linear-gradient(135deg, #f8f9fa, #e9ecef); border-radius: 15px; text-align: center;">
-            <div style="display: flex; justify-content: space-around; align-items: center; flex-wrap: wrap;">
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">🔧 Built with</strong><br>
-                    <span style="color: #6c757d;">Gradio + FastAPI</span>
-                </div>
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">⚡ Optimized for</strong><br>
-                    <span style="color: #6c757d;">800MB+ datasets</span>
-                </div>
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">🧠 Powered by</strong><br>
-                    <span style="color: #6c757d;">scikit-learn + MLxtend</span>
-                </div>
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">📊 Advanced</strong><br>
-                    <span style="color: #6c757d;">MiniBatch clustering</span>
-                </div>
-            </div>
-        </div>
-        """)
-    
-    return gradio_app-wrap: wrap;">
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">🔧 Built with</strong><br>
-                    <span style="color: #6c757d;">Gradio + FastAPI</span>
-                </div>
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">⚡ Optimized for</strong><br>
-                    <span style="color: #6c757d;">800MB+ datasets</span>
-                </div>
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">🧠 Powered by</strong><br>
-                    <span style="color: #6c757d;">scikit-learn + MLxtend</span>
-                </div>
-                <div style="margin: 10px;">
-                    <strong style="color: #495057;">📊 Advanced</strong><br>
-                    <span style="color: #6c757d;">MiniBatch clustering</span>
-                </div>
+        <div style="margin-top: 25px; padding: 15px; background: linear-gradient(135deg, #f8f9fa, #e9ecef); border-radius: 12px; text-align: center;">
+            <div style="display: flex; justify-content: space-around; align-items: center; flex-wrap: wrap; gap: 15px;">
+                <div><strong>🔧 Built with</strong><br><span style="color: #6c757d;">Gradio + FastAPI</span></div>
+                <div><strong>⚡ Optimized for</strong><br><span style="color: #6c757d;">300MB+ datasets</span></div>
+                <div><strong>🧠 Powered by</strong><br><span style="color: #6c757d;">scikit-learn + MLxtend</span></div>
+                <div><strong>📊 Advanced</strong><br><span style="color: #6c757d;">MiniBatch clustering</span></div>
             </div>
         </div>
         """)
     
     return gradio_app
 
-# Create FastAPI app with enhanced error handling
+# Create FastAPI app
 app = FastAPI(
     title="Market Basket Analysis Dashboard",
-    description="Ultra-optimized for large datasets",
-    version="2.0.0"
+    description="Optimized for large datasets",
+    version="1.0.0"
 )
 
 # Health check endpoint for Cloud Run
@@ -1238,10 +1078,7 @@ async def health_check():
             "message": "Market Basket Analysis Dashboard is running"
         }
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Health check failed: {str(e)}"
-        }
+        return {"status": "error", "message": f"Health check failed: {str(e)}"}
 
 # Memory status endpoint
 @app.get("/status")
@@ -1256,10 +1093,7 @@ async def status_check():
             "status": "operational"
         }
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Status check failed: {str(e)}"
-        }
+        return {"status": "error", "message": f"Status check failed: {str(e)}"}
 
 # Global exception handler
 @app.exception_handler(Exception)
@@ -1276,11 +1110,15 @@ app = gr.mount_gradio_app(app, gradio_app, path="/")
 
 if __name__ == "__main__":
     try:
-        logging.info("✅ Creating ultra-optimized interface...")
-        print("✅ Market Basket Analysis Dashboard (Ultra-Optimized) is ready!")
-        print("🚀 Optimized for 800MB+ files and 3.5M+ rows")
-        print("💾 Advanced memory management enabled")
-        print("⚡ MiniBatch algorithms for large-scale processing")
+        logging.info("✅ Creating optimized interface...")
+        print("✅ Market Basket Analysis Dashboard is ready!")
+        print(f"🚀 Optimized for 300MB+ files")
+        print(f"💾 Advanced memory management enabled")
+        print(f"⚡ Starting on port {PORT}")
+        
+        # Start the server
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+        
     except Exception as e:
         logging.error(f"Failed to start application: {str(e)}", exc_info=True)
         print(f"❌ Failed to start application: {e}")
